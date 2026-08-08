@@ -1,8 +1,14 @@
 package bot
 
 import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
 	"testing"
+	"time"
 
+	"brsaver/internal/media"
 	"brsaver/internal/telegram"
 )
 
@@ -35,4 +41,62 @@ func TestJobsForUpdateFiltersChatsAndLimitsLinks(t *testing.T) {
 	if jobs := application.jobsForUpdate(update); len(jobs) != 0 {
 		t.Fatalf("got jobs from private chat: %#v", jobs)
 	}
+}
+
+func TestHandleSendsDownloadedPhotosWithoutTranscoding(t *testing.T) {
+	t.Parallel()
+
+	client := &photoTelegramClient{}
+	application := New(client, photoMediaDownloader{}, rejectingTranscoder{}, Config{
+		DownloadTimeout: time.Second, UploadTimeout: time.Second, CompressionTimeout: time.Second,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	application.handle(context.Background(), job{
+		chatID: -1001, messageID: 15, threadID: 9,
+		link: media.Link{URL: "https://vt.tiktok.com/example/", Provider: "TikTok"},
+	})
+
+	if len(client.photos) != 2 || client.chatID != -1001 || client.messageID != 15 || client.threadID != 9 {
+		t.Fatalf("unexpected photo upload: %#v", client)
+	}
+}
+
+type photoTelegramClient struct {
+	chatID, messageID, threadID int64
+	photos                      []string
+}
+
+func (c *photoTelegramClient) GetMe(context.Context) (telegram.User, error) {
+	return telegram.User{}, nil
+}
+
+func (c *photoTelegramClient) DeleteWebhook(context.Context) error { return nil }
+
+func (c *photoTelegramClient) GetUpdates(context.Context, int64) ([]telegram.Update, error) {
+	return nil, nil
+}
+
+func (c *photoTelegramClient) SendText(context.Context, int64, int, int, string) error { return nil }
+
+func (c *photoTelegramClient) SendVideo(context.Context, int64, int, int, string) error {
+	return errors.New("unexpected video upload")
+}
+
+func (c *photoTelegramClient) SendPhotos(_ context.Context, chatID int64, messageID, threadID int, paths []string) error {
+	c.chatID = chatID
+	c.messageID = int64(messageID)
+	c.threadID = int64(threadID)
+	c.photos = append([]string(nil), paths...)
+	return nil
+}
+
+type photoMediaDownloader struct{}
+
+func (photoMediaDownloader) Download(context.Context, string) (*media.DownloadedFile, error) {
+	return &media.DownloadedFile{Photos: []string{"one.jpg", "two.jpg"}}, nil
+}
+
+type rejectingTranscoder struct{}
+
+func (rejectingTranscoder) Compress(context.Context, *media.DownloadedFile) (media.CompressionResult, error) {
+	return media.CompressionResult{}, errors.New("unexpected transcode")
 }

@@ -21,6 +21,7 @@ type Config struct {
 	TelegramAPIBaseURL string
 	YTDLPPath          string
 	YTDLPFormat        string
+	TikTokPhotoHelper  string
 	FFmpegPath         string
 	FFprobePath        string
 	CookiesFile        string
@@ -48,6 +49,7 @@ func Load() (Config, error) {
 		TelegramAPIBaseURL: envOr("TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
 		YTDLPPath:          envOr("YT_DLP_PATH", "yt-dlp"),
 		YTDLPFormat:        envOr("YT_DLP_FORMAT", defaultFormat),
+		TikTokPhotoHelper:  envOr("TIKTOK_PHOTO_HELPER_PATH", "brsaver-tiktok-photos"),
 		FFmpegPath:         envOr("FFMPEG_PATH", "ffmpeg"),
 		FFprobePath:        envOr("FFPROBE_PATH", "ffprobe"),
 		CookiesFile:        strings.TrimSpace(os.Getenv("YT_DLP_COOKIES_FILE")),
@@ -119,7 +121,7 @@ func Load() (Config, error) {
 	if cfg.SizeCheckInterval < 100*time.Millisecond || cfg.SizeCheckInterval > 10*time.Second {
 		return Config{}, fmt.Errorf("SIZE_CHECK_INTERVAL must be between 100ms and 10s")
 	}
-	if cfg.YTDLPPath == "" || cfg.YTDLPFormat == "" || cfg.FFmpegPath == "" || cfg.FFprobePath == "" || cfg.DownloadDir == "" {
+	if cfg.YTDLPPath == "" || cfg.YTDLPFormat == "" || cfg.TikTokPhotoHelper == "" || cfg.FFmpegPath == "" || cfg.FFprobePath == "" || cfg.DownloadDir == "" {
 		return Config{}, fmt.Errorf("media tool paths, YT_DLP_FORMAT and DOWNLOAD_DIR cannot be empty")
 	}
 

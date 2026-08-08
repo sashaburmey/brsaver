@@ -11,7 +11,7 @@ import (
 	"brsaver/internal/telegram"
 )
 
-const publicDownloadError = "Не вдалося завантажити це відео. Можливо, воно приватне, недоступне або завелике."
+const publicDownloadError = "Не вдалося завантажити це медіа. Можливо, воно приватне, недоступне або завелике."
 
 type Config struct {
 	Workers            int
@@ -30,6 +30,7 @@ type telegramClient interface {
 	GetUpdates(context.Context, int64) ([]telegram.Update, error)
 	SendText(context.Context, int64, int, int, string) error
 	SendVideo(context.Context, int64, int, int, string) error
+	SendPhotos(context.Context, int64, int, int, []string) error
 }
 
 type mediaDownloader interface {
@@ -175,6 +176,20 @@ func (b *Bot) handle(ctx context.Context, item job) {
 			logger.Error("cannot remove temporary media", "error", cleanupErr)
 		}
 	}()
+	if len(file.Photos) > 0 {
+		uploadCtx, cancelUpload := context.WithTimeout(ctx, b.config.UploadTimeout)
+		err = b.telegram.SendPhotos(uploadCtx, item.chatID, item.messageID, item.threadID, file.Photos)
+		cancelUpload()
+		if err != nil {
+			if ctx.Err() == nil {
+				logger.Error("photo album upload failed", "error", err, "photo_count", len(file.Photos))
+				b.notifyError(ctx, item)
+			}
+			return
+		}
+		logger.Info("photo album sent", "photo_count", len(file.Photos))
+		return
+	}
 
 	compressionCtx, cancelCompression := context.WithTimeout(ctx, b.config.CompressionTimeout)
 	compression, err := b.transcoder.Compress(compressionCtx, file)

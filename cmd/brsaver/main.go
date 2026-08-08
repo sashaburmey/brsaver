@@ -42,6 +42,7 @@ func main() {
 		SizeCheckGap: cfg.SizeCheckInterval,
 		Attempts:     cfg.DownloadAttempts,
 		RetryDelay:   cfg.DownloadRetryDelay,
+		PhotoHelper:  cfg.TikTokPhotoHelper,
 	})
 	if err != nil {
 		logger.Error("cannot initialize media downloader", "error", err)

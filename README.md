@@ -7,6 +7,7 @@ A Telegram bot written in Go that detects TikTok, YouTube Shorts, Instagram, and
 - works in groups and supergroups through Telegram long polling;
 - detects plain URLs and hidden `text_link` URLs;
 - supports TikTok, YouTube Shorts, Instagram Reel/Post/TV, and Facebook Reel/Watch/Video;
+- sends TikTok photo posts as native Telegram photos or albums;
 - downloads multiple links concurrently through a bounded worker queue;
 - limits processing time, the number of links, and file size (49 MiB by default);
 - automatically compresses oversized videos to H.264/AAC using two-pass `ffmpeg` encoding;
@@ -47,13 +48,14 @@ Logs include the event type, provider, chat ID, and message ID, but never the bo
 
 ## Local development
 
-Local development requires Go 1.24+, a current nightly build of [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), and `ffmpeg` in `PATH`. The nightly build is intentional because TikTok, Instagram, and other sites often change their extractor APIs before the next stable release.
+Local development requires Go 1.24+, a current nightly build of [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) with `curl_cffi`, and `ffmpeg` in `PATH`. The nightly build is intentional because TikTok, Instagram, and other sites often change their extractor APIs before the next stable release.
 
 ```bash
 cp .env.example .env
 set -a
 . ./.env
 set +a
+export TIKTOK_PHOTO_HELPER_PATH=./scripts/brsaver_tiktok_photos.py
 go run ./cmd/brsaver
 ```
 
@@ -78,6 +80,7 @@ go run ./cmd/brsaver
 | `DOWNLOAD_DIR` | `/tmp/brsaver` | Root directory for temporary jobs |
 | `YT_DLP_PATH` | `yt-dlp` | Path to the executable |
 | `YT_DLP_FORMAT` | MP4/H.264 preferred | Custom `yt-dlp` format selector |
+| `TIKTOK_PHOTO_HELPER_PATH` | `brsaver-tiktok-photos` | Path to the TikTok photo post helper |
 | `FFMPEG_PATH` / `FFPROBE_PATH` | `ffmpeg` / `ffprobe` | Paths to the transcoding tools |
 | `YT_DLP_COOKIES_FILE` | empty | Netscape cookies file for content you are authorized to access |
 | `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Bot API URL, including a local Bot API server if used |

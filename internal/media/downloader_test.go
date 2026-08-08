@@ -117,6 +117,62 @@ printf '%s\n' "$dir/test.mp4"
 	}
 }
 
+func TestDownloaderFallsBackToTikTokPhotoHelper(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper is a POSIX shell script")
+	}
+	t.Parallel()
+
+	workDir := t.TempDir()
+	downloaderBinary := writeHelper(t, workDir, `#!/bin/sh
+printf '%s\n' 'ERROR: Unsupported URL: https://www.tiktok.com/@creator/photo/123456?_r=1' >&2
+exit 1
+`)
+	photoHelper := filepath.Join(workDir, "fake-photo-helper")
+	if err := os.WriteFile(photoHelper, []byte(`#!/bin/sh
+printf 'photo-data' > "$2/photo-01.jpg"
+printf '%s\n' '{"files":["photo-01.jpg"]}'
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	downloader, err := NewDownloader(DownloaderConfig{
+		Binary: downloaderBinary, WorkDir: workDir, Format: "best", MaxFileSize: 1024,
+		SizeCheckGap: time.Millisecond, Attempts: 1, PhotoHelper: photoHelper,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	media, err := downloader.Download(context.Background(), "https://vt.tiktok.com/example/")
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	if media.Path != "" || len(media.Photos) != 1 {
+		t.Fatalf("unexpected downloaded media: %#v", media)
+	}
+	if body, err := os.ReadFile(media.Photos[0]); err != nil || string(body) != "photo-data" {
+		t.Fatalf("downloaded photo = %q, %v", body, err)
+	}
+	jobDir := filepath.Dir(media.Photos[0])
+	if err := media.Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(jobDir); !os.IsNotExist(err) {
+		t.Fatalf("photo job directory still exists after cleanup: %v", err)
+	}
+}
+
+func TestExtractTikTokPhotoURL(t *testing.T) {
+	t.Parallel()
+
+	detail := "ERROR: Unsupported URL: https://www.tiktok.com/@creator/photo/123456?_r=1&_t=test"
+	got := extractTikTokPhotoURL(detail)
+	want := "https://www.tiktok.com/@creator/photo/123456?_r=1&_t=test"
+	if got != want {
+		t.Fatalf("extractTikTokPhotoURL() = %q, want %q", got, want)
+	}
+}
+
 func TestFindOutputPathStaysInsideJobDirectory(t *testing.T) {
 	t.Parallel()
 

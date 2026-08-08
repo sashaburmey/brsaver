@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -79,6 +80,89 @@ func TestClientSendVideoAsMultipart(t *testing.T) {
 	}
 	client := testClient(t, server.URL)
 	if err := client.SendVideo(context.Background(), -1001, 7, 9, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClientSendPhotosAsMediaGroup(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/bot123:test-token/sendMediaGroup" {
+			t.Errorf("path = %q", request.URL.Path)
+		}
+		if err := request.ParseMultipartForm(1024 * 1024); err != nil {
+			t.Errorf("parse multipart form: %v", err)
+		}
+		var media []struct {
+			Type  string `json:"type"`
+			Media string `json:"media"`
+		}
+		if err := json.Unmarshal([]byte(request.FormValue("media")), &media); err != nil {
+			t.Errorf("decode media: %v", err)
+		}
+		if len(media) != 2 || media[0].Type != "photo" || media[0].Media != "attach://photo0" || media[1].Media != "attach://photo1" {
+			t.Errorf("unexpected media payload: %#v", media)
+		}
+		for index, want := range []string{"photo-one", "photo-two"} {
+			file, _, err := request.FormFile("photo" + strconv.Itoa(index))
+			if err != nil {
+				t.Errorf("photo%d field: %v", index, err)
+				continue
+			}
+			body, _ := io.ReadAll(file)
+			_ = file.Close()
+			if string(body) != want {
+				t.Errorf("photo%d body = %q, want %q", index, body, want)
+			}
+		}
+		_, _ = io.WriteString(writer, `{"ok":true,"result":[{"message_id":8},{"message_id":9}]}`)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	paths := []string{filepath.Join(dir, "one.jpg"), filepath.Join(dir, "two.jpg")}
+	for index, body := range []string{"photo-one", "photo-two"} {
+		if err := os.WriteFile(paths[index], []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client := testClient(t, server.URL)
+	if err := client.SendPhotos(context.Background(), -1001, 7, 9, paths); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClientSendsSinglePhoto(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/bot123:test-token/sendPhoto" {
+			t.Errorf("path = %q", request.URL.Path)
+		}
+		if err := request.ParseMultipartForm(1024 * 1024); err != nil {
+			t.Errorf("parse multipart form: %v", err)
+		}
+		file, _, err := request.FormFile("photo")
+		if err != nil {
+			t.Errorf("photo field: %v", err)
+		} else {
+			body, _ := io.ReadAll(file)
+			_ = file.Close()
+			if string(body) != "photo-data" {
+				t.Errorf("photo body = %q", body)
+			}
+		}
+		_, _ = io.WriteString(writer, `{"ok":true,"result":{"message_id":8}}`)
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "photo.jpg")
+	if err := os.WriteFile(path, []byte("photo-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := testClient(t, server.URL)
+	if err := client.SendPhotos(context.Background(), -1001, 7, 0, []string{path}); err != nil {
 		t.Fatal(err)
 	}
 }

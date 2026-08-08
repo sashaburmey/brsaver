@@ -3,12 +3,14 @@ package media
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +18,14 @@ import (
 )
 
 var ErrFileTooLarge = errors.New("downloaded media exceeds the configured size limit")
+
+const (
+	defaultTikTokPhotoHelper = "brsaver-tiktok-photos"
+	maxTikTokPhotos          = 35
+	maxTelegramPhotoSize     = 10 * 1024 * 1024
+)
+
+var tiktokPhotoURLPattern = regexp.MustCompile(`https://www\.tiktok\.com/@[^/\s]+/photo/[0-9]+[^\s]*`)
 
 type DownloaderConfig struct {
 	Binary       string
@@ -26,6 +36,7 @@ type DownloaderConfig struct {
 	SizeCheckGap time.Duration
 	Attempts     int
 	RetryDelay   time.Duration
+	PhotoHelper  string
 }
 
 type Downloader struct {
@@ -37,13 +48,15 @@ type Downloader struct {
 	sizeCheckGap time.Duration
 	attempts     int
 	retryDelay   time.Duration
+	photoHelper  string
 }
 
 type DownloadedFile struct {
-	Path string
-	dir  string
-	once sync.Once
-	err  error
+	Path   string
+	Photos []string
+	dir    string
+	once   sync.Once
+	err    error
 }
 
 func NewDownloader(cfg DownloaderConfig) (*Downloader, error) {
@@ -62,6 +75,9 @@ func NewDownloader(cfg DownloaderConfig) (*Downloader, error) {
 	if cfg.RetryDelay <= 0 {
 		cfg.RetryDelay = 2 * time.Second
 	}
+	if cfg.PhotoHelper == "" {
+		cfg.PhotoHelper = defaultTikTokPhotoHelper
+	}
 	if err := os.MkdirAll(cfg.WorkDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create download directory: %w", err)
 	}
@@ -74,6 +90,7 @@ func NewDownloader(cfg DownloaderConfig) (*Downloader, error) {
 		sizeCheckGap: cfg.SizeCheckGap,
 		attempts:     cfg.Attempts,
 		retryDelay:   cfg.RetryDelay,
+		photoHelper:  cfg.PhotoHelper,
 	}, nil
 }
 
@@ -194,6 +211,14 @@ func (d *Downloader) downloadOnce(ctx context.Context, rawURL string) (_ *Downlo
 		if detail == "" {
 			detail = err.Error()
 		}
+		if photoURL := extractTikTokPhotoURL(detail); photoURL != "" {
+			photos, photoErr := d.downloadTikTokPhotos(ctx, photoURL, dir)
+			if photoErr == nil {
+				keep = true
+				return &DownloadedFile{Photos: photos, dir: dir}, nil
+			}
+			return nil, photoErr
+		}
 		detail = strings.ReplaceAll(detail, rawURL, "[URL]")
 		return nil, fmt.Errorf("yt-dlp failed: %s", detail)
 	}
@@ -218,6 +243,82 @@ func (d *Downloader) downloadOnce(ctx context.Context, rawURL string) (_ *Downlo
 
 	keep = true
 	return &DownloadedFile{Path: path, dir: dir}, nil
+}
+
+func (d *Downloader) downloadTikTokPhotos(ctx context.Context, photoURL, dir string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, d.photoHelper,
+		photoURL,
+		dir,
+		strconv.Itoa(maxTikTokPhotos),
+		strconv.FormatInt(maxTelegramPhotoSize, 10),
+		strconv.FormatInt(d.maxFileSize, 10),
+		d.cookiesFile,
+	)
+	var stdout bytes.Buffer
+	var stderr limitedBuffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = err.Error()
+		}
+		detail = strings.ReplaceAll(detail, photoURL, "[URL]")
+		return nil, fmt.Errorf("TikTok photo helper failed: %s", detail)
+	}
+
+	var result struct {
+		Files []string `json:"files"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		return nil, fmt.Errorf("decode TikTok photo helper output: %w", err)
+	}
+	if len(result.Files) == 0 || len(result.Files) > maxTikTokPhotos {
+		return nil, errors.New("TikTok photo helper returned an invalid number of files")
+	}
+
+	paths := make([]string, 0, len(result.Files))
+	seen := make(map[string]struct{}, len(result.Files))
+	var totalSize int64
+	for _, name := range result.Files {
+		path := name
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(dir, path)
+		}
+		path = filepath.Clean(path)
+		if !isWithin(path, dir) {
+			return nil, errors.New("TikTok photo helper returned a path outside the job directory")
+		}
+		if _, exists := seen[path]; exists {
+			return nil, errors.New("TikTok photo helper returned a duplicate file")
+		}
+		seen[path] = struct{}{}
+
+		info, err := os.Lstat(path)
+		if err != nil {
+			return nil, fmt.Errorf("inspect downloaded photo: %w", err)
+		}
+		if !info.Mode().IsRegular() || info.Size() <= 0 {
+			return nil, errors.New("downloaded photo is not a non-empty regular file")
+		}
+		if info.Size() > maxTelegramPhotoSize {
+			return nil, errors.New("downloaded photo exceeds the Telegram photo size limit")
+		}
+		totalSize += info.Size()
+		if totalSize > d.maxFileSize {
+			return nil, ErrFileTooLarge
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
+}
+
+func extractTikTokPhotoURL(detail string) string {
+	match := tiktokPhotoURLPattern.FindString(detail)
+	return strings.TrimRight(match, `"'.,);]}`)
 }
 
 func (f *DownloadedFile) Cleanup() error {

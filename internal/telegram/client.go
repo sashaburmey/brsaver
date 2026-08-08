@@ -19,6 +19,8 @@ import (
 
 const maxAPIResponseSize = 2 * 1024 * 1024
 
+const maxMediaGroupSize = 10
+
 type ClientConfig struct {
 	Token         string
 	APIBaseURL    string
@@ -119,46 +121,106 @@ func (c *Client) SendVideo(ctx context.Context, chatID int64, messageID, threadI
 	}
 	defer file.Close()
 
-	reader, writer := io.Pipe()
-	multipartWriter := multipart.NewWriter(writer)
-	contentType := multipartWriter.FormDataContentType()
-	writeResult := make(chan error, 1)
-	go func() {
-		writeErr := writeVideoForm(multipartWriter, file, chatID, messageID, threadID, filepath.Base(path))
-		if closeErr := multipartWriter.Close(); writeErr == nil {
-			writeErr = closeErr
+	return c.doMultipart(ctx, "sendVideo", func(writer *multipart.Writer) error {
+		return writeVideoForm(writer, file, chatID, messageID, threadID, filepath.Base(path))
+	})
+}
+
+func (c *Client) SendPhotos(ctx context.Context, chatID int64, messageID, threadID int, paths []string) error {
+	if len(paths) == 0 {
+		return errors.New("at least one photo is required")
+	}
+	for start := 0; start < len(paths); start += maxMediaGroupSize {
+		end := min(start+maxMediaGroupSize, len(paths))
+		if err := c.sendPhotoBatch(ctx, chatID, messageID, threadID, paths[start:end]); err != nil {
+			return fmt.Errorf("send photo batch %d: %w", start/maxMediaGroupSize+1, err)
 		}
-		_ = writer.CloseWithError(writeErr)
-		writeResult <- writeErr
+	}
+	return nil
+}
+
+func (c *Client) sendPhotoBatch(ctx context.Context, chatID int64, messageID, threadID int, paths []string) error {
+	files := make([]*os.File, 0, len(paths))
+	for _, path := range paths {
+		file, err := os.Open(path)
+		if err != nil {
+			for _, opened := range files {
+				_ = opened.Close()
+			}
+			return fmt.Errorf("open photo for upload: %w", err)
+		}
+		files = append(files, file)
+	}
+	defer func() {
+		for _, file := range files {
+			_ = file.Close()
+		}
 	}()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"sendVideo", reader)
-	if err != nil {
-		_ = reader.CloseWithError(err)
-		<-writeResult
-		return fmt.Errorf("create video upload request: %w", err)
+	method := "sendMediaGroup"
+	if len(files) == 1 {
+		method = "sendPhoto"
 	}
-	req.Header.Set("Content-Type", contentType)
-	response, err := c.uploadClient.Do(req)
-	if err != nil {
-		_ = reader.CloseWithError(err)
-		<-writeResult
-		return safeHTTPError("upload video", err)
-	}
-	writeErr := <-writeResult
-	if writeErr != nil {
-		_ = response.Body.Close()
-		return fmt.Errorf("build video upload: %w", writeErr)
-	}
-	defer response.Body.Close()
-	return decodeResponse(response, nil)
+	return c.doMultipart(ctx, method, func(writer *multipart.Writer) error {
+		return writePhotoForm(writer, files, chatID, messageID, threadID)
+	})
 }
 
 func writeVideoForm(writer *multipart.Writer, file *os.File, chatID int64, messageID, threadID int, filename string) error {
-	fields := map[string]string{
-		"chat_id":            strconv.FormatInt(chatID, 10),
-		"supports_streaming": "true",
+	if err := writeUploadFields(writer, chatID, messageID, threadID); err != nil {
+		return err
 	}
+	if err := writer.WriteField("supports_streaming", "true"); err != nil {
+		return err
+	}
+	part, err := writer.CreateFormFile("video", filename)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(part, file)
+	return err
+}
+
+func writePhotoForm(writer *multipart.Writer, files []*os.File, chatID int64, messageID, threadID int) error {
+	if err := writeUploadFields(writer, chatID, messageID, threadID); err != nil {
+		return err
+	}
+	if len(files) == 1 {
+		part, err := writer.CreateFormFile("photo", filepath.Base(files[0].Name()))
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(part, files[0])
+		return err
+	}
+
+	media := make([]map[string]string, 0, len(files))
+	for index := range files {
+		media = append(media, map[string]string{
+			"type":  "photo",
+			"media": "attach://photo" + strconv.Itoa(index),
+		})
+	}
+	encodedMedia, err := json.Marshal(media)
+	if err != nil {
+		return err
+	}
+	if err := writer.WriteField("media", string(encodedMedia)); err != nil {
+		return err
+	}
+	for index, file := range files {
+		part, err := writer.CreateFormFile("photo"+strconv.Itoa(index), filepath.Base(file.Name()))
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(part, file); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeUploadFields(writer *multipart.Writer, chatID int64, messageID, threadID int) error {
 	reply, err := json.Marshal(map[string]any{
 		"message_id":                  messageID,
 		"allow_sending_without_reply": true,
@@ -166,7 +228,10 @@ func writeVideoForm(writer *multipart.Writer, file *os.File, chatID int64, messa
 	if err != nil {
 		return err
 	}
-	fields["reply_parameters"] = string(reply)
+	fields := map[string]string{
+		"chat_id":          strconv.FormatInt(chatID, 10),
+		"reply_parameters": string(reply),
+	}
 	if threadID != 0 {
 		fields["message_thread_id"] = strconv.Itoa(threadID)
 	}
@@ -175,12 +240,43 @@ func writeVideoForm(writer *multipart.Writer, file *os.File, chatID int64, messa
 			return err
 		}
 	}
-	part, err := writer.CreateFormFile("video", filename)
+	return nil
+}
+
+func (c *Client) doMultipart(ctx context.Context, method string, build func(*multipart.Writer) error) error {
+	reader, writer := io.Pipe()
+	multipartWriter := multipart.NewWriter(writer)
+	contentType := multipartWriter.FormDataContentType()
+	writeResult := make(chan error, 1)
+	go func() {
+		writeErr := build(multipartWriter)
+		if closeErr := multipartWriter.Close(); writeErr == nil {
+			writeErr = closeErr
+		}
+		_ = writer.CloseWithError(writeErr)
+		writeResult <- writeErr
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+method, reader)
 	if err != nil {
-		return err
+		_ = reader.CloseWithError(err)
+		<-writeResult
+		return fmt.Errorf("create %s upload request: %w", method, err)
 	}
-	_, err = io.Copy(part, file)
-	return err
+	req.Header.Set("Content-Type", contentType)
+	response, err := c.uploadClient.Do(req)
+	if err != nil {
+		_ = reader.CloseWithError(err)
+		<-writeResult
+		return safeHTTPError("upload media with "+method, err)
+	}
+	writeErr := <-writeResult
+	if writeErr != nil {
+		_ = response.Body.Close()
+		return fmt.Errorf("build %s upload: %w", method, writeErr)
+	}
+	defer response.Body.Close()
+	return decodeResponse(response, nil)
 }
 
 func (c *Client) doJSON(ctx context.Context, method string, payload, result any) error {
