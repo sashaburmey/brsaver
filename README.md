@@ -1,53 +1,53 @@
 # brsaver
 
-Telegram-бот на Go, який знаходить у повідомленнях групи посилання на TikTok, YouTube Shorts, Instagram та Facebook, завантажує відео через `yt-dlp`, надсилає його відповіддю як Telegram-відео й одразу видаляє тимчасові файли.
+A Telegram bot written in Go that detects TikTok, YouTube Shorts, Instagram, and Facebook links in group messages, downloads videos with `yt-dlp`, replies with them as native Telegram videos, and immediately removes all temporary files.
 
-## Можливості
+## Features
 
-- працює в групах і супергрупах через Telegram long polling;
-- розпізнає звичайні URL і приховані `text_link`-посилання;
-- підтримує TikTok, YouTube Shorts, Instagram Reel/Post/TV та Facebook Reel/Watch/Video;
-- завантажує кілька посилань паралельно через обмежену чергу воркерів;
-- обмежує тривалість, кількість посилань і розмір файлу (за замовчуванням 49 МіБ);
-- автоматично стискає завеликі відео у H.264/AAC за допомогою двопрохідного `ffmpeg`;
-- зберігає тему forum-групи та відповідає на оригінальне повідомлення;
-- створює окремий каталог для кожного завантаження і видаляє його після успіху або помилки;
-- не передає URL у shell: `yt-dlp` запускається напряму з масивом аргументів.
-- підтримує browser impersonation через `curl_cffi` для TikTok-сторінок із TLS/JS challenge.
+- works in groups and supergroups through Telegram long polling;
+- detects plain URLs and hidden `text_link` URLs;
+- supports TikTok, YouTube Shorts, Instagram Reel/Post/TV, and Facebook Reel/Watch/Video;
+- downloads multiple links concurrently through a bounded worker queue;
+- limits processing time, the number of links, and file size (49 MiB by default);
+- automatically compresses oversized videos to H.264/AAC using two-pass `ffmpeg` encoding;
+- preserves forum group topics and replies to the original message;
+- creates an isolated directory for every download and removes it after either success or failure;
+- never passes URLs through a shell: `yt-dlp` is executed directly with an argument array;
+- supports browser impersonation through `curl_cffi` for TikTok pages protected by TLS/JS challenges.
 
-## Швидкий запуск через Docker Compose
+## Quick start with Docker Compose
 
-1. Створіть бота через [@BotFather](https://t.me/BotFather) і скопіюйте token.
-2. У BotFather виконайте `/setprivacy`, виберіть бота й натисніть **Disable**. Інакше Telegram не надсилатиме боту звичайні повідомлення групи.
-3. Додайте бота до потрібної групи.
-4. Створіть локальний `.env`:
+1. Create a bot through [@BotFather](https://t.me/BotFather) and copy its token.
+2. In BotFather, run `/setprivacy`, select the bot, and choose **Disable**. Otherwise, Telegram will not send ordinary group messages to the bot.
+3. Add the bot to the required group.
+4. Create a local `.env` file:
 
    ```bash
    cp .env.example .env
    ```
 
-   Запишіть у нього справжній `TELEGRAM_BOT_TOKEN`. Щоб обмежити бота конкретними групами, вкажіть їхні ID у `ALLOWED_CHAT_IDS`.
+   Set the actual `TELEGRAM_BOT_TOKEN`. To restrict the bot to specific groups, add their IDs to `ALLOWED_CHAT_IDS`.
 
-5. Запустіть:
+5. Start the service:
 
    ```bash
    docker compose up --build -d
    docker compose logs -f brsaver
    ```
 
-Контейнер має read-only root filesystem. Завантаження відбуваються лише у тимчасовій файловій системі `/tmp`, яка зникає разом із контейнером; застосунок додатково видаляє каталог кожної задачі одразу після надсилання.
+The container has a read-only root filesystem. Downloads are stored only in the temporary `/tmp` filesystem, which disappears with the container. The application also removes each job directory immediately after the media has been sent.
 
-Події та помилки пишуться у Docker logs. Для журналу використовується драйвер `local` із ротацією: до п'яти файлів по 10 МБ. Перегляд:
+Events and errors are written to Docker logs. The `local` logging driver rotates the logs and retains up to five 10 MB files. To view them, run:
 
 ```bash
 docker compose logs -f brsaver
 ```
 
-Логи містять тип події, provider, chat ID та message ID, але не містять bot token або повний URL медіа.
+Logs include the event type, provider, chat ID, and message ID, but never the bot token or full media URL.
 
-## Локальний запуск
+## Local development
 
-Потрібні Go 1.24+, актуальний nightly [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) та `ffmpeg` у `PATH`. Nightly використовується навмисно: TikTok, Instagram та інші сайти часто змінюють extractor API раніше за наступний stable-реліз.
+Local development requires Go 1.24+, a current nightly build of [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), and `ffmpeg` in `PATH`. The nightly build is intentional because TikTok, Instagram, and other sites often change their extractor APIs before the next stable release.
 
 ```bash
 cp .env.example .env
@@ -57,32 +57,32 @@ set +a
 go run ./cmd/brsaver
 ```
 
-## Конфігурація
+## Configuration
 
-| Змінна | Типове значення | Призначення |
+| Variable | Default | Description |
 |---|---:|---|
-| `TELEGRAM_BOT_TOKEN` | — | Обов'язковий token від BotFather |
-| `ALLOWED_CHAT_IDS` | усі групи | Список дозволених chat ID через кому |
-| `WORKERS` | `2` | Кількість паралельних завантажень |
-| `QUEUE_SIZE` | `32` | Максимум задач у черзі |
-| `MAX_LINKS_PER_MESSAGE` | `3` | Максимум оброблених URL з одного повідомлення |
-| `MAX_FILE_SIZE_MB` | `49` | Ліміт відео; стандартний Bot API приймає до 50 МБ |
-| `MAX_DOWNLOAD_SIZE_MB` | `250` | Максимальний розмір оригіналу до стиснення |
-| `DOWNLOAD_TIMEOUT` | `4m` | Тайм-аут одного завантаження |
-| `DOWNLOAD_ATTEMPTS` | `3` | Кількість спроб при тимчасовій помилці джерела |
-| `DOWNLOAD_RETRY_DELAY` | `2s` | Пауза між повторними спробами |
-| `COMPRESSION_TIMEOUT` | `12m` | Тайм-аут двопрохідного перекодування |
-| `UPLOAD_TIMEOUT` | `3m` | Тайм-аут надсилання до Telegram |
-| `COMPRESS_OVERSIZED` | `true` | Автоматично стискати відео понад upload-ліміт |
-| `NOTIFY_ERRORS` | `true` | Повідомляти в групу про невдале завантаження |
-| `DOWNLOAD_DIR` | `/tmp/brsaver` | Кореневий каталог тимчасових задач |
-| `YT_DLP_PATH` | `yt-dlp` | Шлях до виконуваного файла |
-| `YT_DLP_FORMAT` | MP4/H.264-preferred | Власний format selector для `yt-dlp` |
-| `FFMPEG_PATH` / `FFPROBE_PATH` | `ffmpeg` / `ffprobe` | Шляхи до інструментів перекодування |
-| `YT_DLP_COOKIES_FILE` | порожньо | Netscape cookies-файл для доступного вам контенту |
-| `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | URL Bot API, зокрема локального сервера |
+| `TELEGRAM_BOT_TOKEN` | — | Required token issued by BotFather |
+| `ALLOWED_CHAT_IDS` | all groups | Comma-separated list of allowed chat IDs |
+| `WORKERS` | `2` | Number of concurrent download workers |
+| `QUEUE_SIZE` | `32` | Maximum number of queued jobs |
+| `MAX_LINKS_PER_MESSAGE` | `3` | Maximum number of URLs processed from one message |
+| `MAX_FILE_SIZE_MB` | `49` | Video upload limit; the standard Bot API accepts files up to 50 MB |
+| `MAX_DOWNLOAD_SIZE_MB` | `250` | Maximum original file size before compression |
+| `DOWNLOAD_TIMEOUT` | `4m` | Timeout for one download operation |
+| `DOWNLOAD_ATTEMPTS` | `3` | Number of attempts after a transient source error |
+| `DOWNLOAD_RETRY_DELAY` | `2s` | Delay between download attempts |
+| `COMPRESSION_TIMEOUT` | `12m` | Timeout for two-pass transcoding |
+| `UPLOAD_TIMEOUT` | `3m` | Timeout for uploading media to Telegram |
+| `COMPRESS_OVERSIZED` | `true` | Automatically compress videos that exceed the upload limit |
+| `NOTIFY_ERRORS` | `true` | Notify the group when a download fails |
+| `DOWNLOAD_DIR` | `/tmp/brsaver` | Root directory for temporary jobs |
+| `YT_DLP_PATH` | `yt-dlp` | Path to the executable |
+| `YT_DLP_FORMAT` | MP4/H.264 preferred | Custom `yt-dlp` format selector |
+| `FFMPEG_PATH` / `FFPROBE_PATH` | `ffmpeg` / `ffprobe` | Paths to the transcoding tools |
+| `YT_DLP_COOKIES_FILE` | empty | Netscape cookies file for content you are authorized to access |
+| `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Bot API URL, including a local Bot API server if used |
 
-Для cookies не додавайте файл до Git. У Docker його можна змонтувати read-only і задати шлях змінною середовища:
+Never commit the cookies file to Git. In Docker, mount it read-only and configure its path through an environment variable:
 
 ```yaml
 services:
@@ -93,11 +93,11 @@ services:
       YT_DLP_COOKIES_FILE: /run/secrets/cookies.txt
 ```
 
-## Перевірки
+## Verification
 
 ```bash
 go test ./...
 go vet ./...
 ```
 
-Завантажуйте й повторно публікуйте лише контент, на який маєте відповідні права. Приватні або захищені платформою матеріали можуть бути недоступні навіть із cookies.
+Only download and republish content when you have the appropriate rights. Private or platform-protected media may remain unavailable even when cookies are provided.
