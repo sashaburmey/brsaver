@@ -1,0 +1,16 @@
+services:
+  brsaver:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=2g,uid=10001,gid=10001
+    cap_drop:
+      - ALL
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
