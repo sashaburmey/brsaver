@@ -34,15 +34,16 @@ func main() {
 	}
 
 	downloader, err := media.NewDownloader(media.DownloaderConfig{
-		Binary:       cfg.YTDLPPath,
-		WorkDir:      cfg.DownloadDir,
-		CookiesFile:  cfg.CookiesFile,
-		Format:       cfg.YTDLPFormat,
-		MaxFileSize:  cfg.MaxDownloadSize,
-		SizeCheckGap: cfg.SizeCheckInterval,
-		Attempts:     cfg.DownloadAttempts,
-		RetryDelay:   cfg.DownloadRetryDelay,
-		PhotoHelper:  cfg.TikTokPhotoHelper,
+		Binary:         cfg.YTDLPPath,
+		WorkDir:        cfg.DownloadDir,
+		CookiesFile:    cfg.CookiesFile,
+		TikTokDeviceID: cfg.TikTokDeviceID,
+		Format:         cfg.YTDLPFormat,
+		MaxFileSize:    cfg.MaxDownloadSize,
+		SizeCheckGap:   cfg.SizeCheckInterval,
+		Attempts:       cfg.DownloadAttempts,
+		RetryDelay:     cfg.DownloadRetryDelay,
+		PhotoHelper:    cfg.TikTokPhotoHelper,
 	})
 	if err != nil {
 		logger.Error("cannot initialize media downloader", "error", err)

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,27 +29,29 @@ const (
 var tiktokPhotoURLPattern = regexp.MustCompile(`https://www\.tiktok\.com/@[^/\s]+/photo/[0-9]+[^\s]*`)
 
 type DownloaderConfig struct {
-	Binary       string
-	WorkDir      string
-	CookiesFile  string
-	Format       string
-	MaxFileSize  int64
-	SizeCheckGap time.Duration
-	Attempts     int
-	RetryDelay   time.Duration
-	PhotoHelper  string
+	Binary         string
+	WorkDir        string
+	CookiesFile    string
+	TikTokDeviceID string
+	Format         string
+	MaxFileSize    int64
+	SizeCheckGap   time.Duration
+	Attempts       int
+	RetryDelay     time.Duration
+	PhotoHelper    string
 }
 
 type Downloader struct {
-	binary       string
-	workDir      string
-	cookiesFile  string
-	format       string
-	maxFileSize  int64
-	sizeCheckGap time.Duration
-	attempts     int
-	retryDelay   time.Duration
-	photoHelper  string
+	binary         string
+	workDir        string
+	cookiesFile    string
+	tikTokDeviceID string
+	format         string
+	maxFileSize    int64
+	sizeCheckGap   time.Duration
+	attempts       int
+	retryDelay     time.Duration
+	photoHelper    string
 }
 
 type DownloadedFile struct {
@@ -82,15 +85,16 @@ func NewDownloader(cfg DownloaderConfig) (*Downloader, error) {
 		return nil, fmt.Errorf("create download directory: %w", err)
 	}
 	return &Downloader{
-		binary:       cfg.Binary,
-		workDir:      cfg.WorkDir,
-		cookiesFile:  cfg.CookiesFile,
-		format:       cfg.Format,
-		maxFileSize:  cfg.MaxFileSize,
-		sizeCheckGap: cfg.SizeCheckGap,
-		attempts:     cfg.Attempts,
-		retryDelay:   cfg.RetryDelay,
-		photoHelper:  cfg.PhotoHelper,
+		binary:         cfg.Binary,
+		workDir:        cfg.WorkDir,
+		cookiesFile:    cfg.CookiesFile,
+		tikTokDeviceID: cfg.TikTokDeviceID,
+		format:         cfg.Format,
+		maxFileSize:    cfg.MaxFileSize,
+		sizeCheckGap:   cfg.SizeCheckGap,
+		attempts:       cfg.Attempts,
+		retryDelay:     cfg.RetryDelay,
+		photoHelper:    cfg.PhotoHelper,
 	}, nil
 }
 
@@ -133,6 +137,21 @@ func (d *Downloader) downloadOnce(ctx context.Context, rawURL string) (_ *Downlo
 		}
 	}()
 
+	cookiesFile, err := d.copyCookies(dir)
+	if err != nil {
+		return nil, err
+	}
+	if cookiesFile != "" {
+		defer func(path string) {
+			if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+				keep = false
+				if resultErr == nil {
+					resultErr = fmt.Errorf("remove temporary cookies: %w", removeErr)
+				}
+			}
+		}(cookiesFile)
+	}
+
 	args := []string{
 		"--ignore-config",
 		"--no-cache-dir",
@@ -149,8 +168,14 @@ func (d *Downloader) downloadOnce(ctx context.Context, rawURL string) (_ *Downlo
 		"--output", "%(extractor)s-%(id)s.%(ext)s",
 		"--socket-timeout", "30",
 	}
-	if d.cookiesFile != "" {
-		args = append(args, "--cookies", d.cookiesFile)
+	if cookiesFile != "" {
+		args = append(args, "--cookies", cookiesFile)
+	}
+	if d.tikTokDeviceID != "" {
+		args = append(args, "--extractor-args", "tiktok:device_id="+d.tikTokDeviceID)
+	}
+	if isTikTokURL(rawURL) {
+		args = append(args, "--impersonate", "chrome")
 	}
 	args = append(args, "--", rawURL)
 
@@ -212,7 +237,7 @@ func (d *Downloader) downloadOnce(ctx context.Context, rawURL string) (_ *Downlo
 			detail = err.Error()
 		}
 		if photoURL := extractTikTokPhotoURL(detail); photoURL != "" {
-			photos, photoErr := d.downloadTikTokPhotos(ctx, photoURL, dir)
+			photos, photoErr := d.downloadTikTokPhotos(ctx, photoURL, dir, cookiesFile)
 			if photoErr == nil {
 				keep = true
 				return &DownloadedFile{Photos: photos, dir: dir}, nil
@@ -221,6 +246,11 @@ func (d *Downloader) downloadOnce(ctx context.Context, rawURL string) (_ *Downlo
 		}
 		detail = strings.ReplaceAll(detail, rawURL, "[URL]")
 		return nil, fmt.Errorf("yt-dlp failed: %s", detail)
+	}
+	if cookiesFile != "" {
+		if err := os.Remove(cookiesFile); err != nil {
+			return nil, fmt.Errorf("remove temporary cookies: %w", err)
+		}
 	}
 
 	path, err := findOutputPath(dir, stdout.String())
@@ -245,14 +275,50 @@ func (d *Downloader) downloadOnce(ctx context.Context, rawURL string) (_ *Downlo
 	return &DownloadedFile{Path: path, dir: dir}, nil
 }
 
-func (d *Downloader) downloadTikTokPhotos(ctx context.Context, photoURL, dir string) ([]string, error) {
+func (d *Downloader) copyCookies(dir string) (string, error) {
+	if d.cookiesFile == "" {
+		return "", nil
+	}
+
+	source, err := os.Open(d.cookiesFile)
+	if err != nil {
+		return "", fmt.Errorf("open cookies file: %w", err)
+	}
+	defer source.Close()
+
+	info, err := source.Stat()
+	if err != nil {
+		return "", fmt.Errorf("inspect cookies file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("cookies file is not a regular file")
+	}
+
+	path := filepath.Join(dir, "cookies.txt")
+	target, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("create temporary cookies file: %w", err)
+	}
+	if _, err = io.Copy(target, source); err != nil {
+		_ = target.Close()
+		_ = os.Remove(path)
+		return "", fmt.Errorf("copy cookies file: %w", err)
+	}
+	if err = target.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("close temporary cookies file: %w", err)
+	}
+	return path, nil
+}
+
+func (d *Downloader) downloadTikTokPhotos(ctx context.Context, photoURL, dir, cookiesFile string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, d.photoHelper,
 		photoURL,
 		dir,
 		strconv.Itoa(maxTikTokPhotos),
 		strconv.FormatInt(maxTelegramPhotoSize, 10),
 		strconv.FormatInt(d.maxFileSize, 10),
-		d.cookiesFile,
+		cookiesFile,
 	)
 	var stdout bytes.Buffer
 	var stderr limitedBuffer
@@ -383,6 +449,15 @@ func isWithin(path, dir string) bool {
 	}
 	relative, err := filepath.Rel(absoluteDir, absolutePath)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func isTikTokURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	return host == "tiktok.com" || strings.HasSuffix(host, ".tiktok.com")
 }
 
 func directorySize(dir string) (int64, error) {

@@ -117,6 +117,105 @@ printf '%s\n' "$dir/test.mp4"
 	}
 }
 
+func TestDownloaderUsesWritablePrivateCookieCopy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper is a POSIX shell script")
+	}
+	t.Parallel()
+
+	workDir := t.TempDir()
+	cookiesFile := filepath.Join(workDir, "source-cookies.txt")
+	const originalCookies = "# Netscape HTTP Cookie File\n.example.test\tTRUE\t/\tTRUE\t0\tsession\tsecret\n"
+	if err := os.WriteFile(cookiesFile, []byte(originalCookies), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	helper := writeHelper(t, workDir, `#!/bin/sh
+dir=""
+cookies=""
+extractor_args=""
+impersonate=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--paths" ]; then dir="$argument"; fi
+  if [ "$previous" = "--cookies" ]; then cookies="$argument"; fi
+  if [ "$previous" = "--extractor-args" ]; then extractor_args="$argument"; fi
+  if [ "$previous" = "--impersonate" ]; then impersonate="$argument"; fi
+  previous="$argument"
+done
+[ -n "$cookies" ] || exit 10
+[ "$cookies" != "`+cookiesFile+`" ] || exit 11
+[ "$extractor_args" = "tiktok:device_id=7301234567890123456" ] || exit 12
+[ "$impersonate" = "chrome" ] || exit 14
+printf '# refreshed\n' >> "$cookies" || exit 13
+printf 'video-data' > "$dir/test.mp4"
+printf '%s\n' "$dir/test.mp4"
+`)
+	downloader, err := NewDownloader(DownloaderConfig{
+		Binary: helper, WorkDir: workDir, CookiesFile: cookiesFile,
+		TikTokDeviceID: "7301234567890123456", Format: "best", MaxFileSize: 1024,
+		SizeCheckGap: time.Millisecond, Attempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	media, err := downloader.Download(context.Background(), "https://vt.tiktok.com/example/")
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	defer media.Cleanup()
+	if body, err := os.ReadFile(cookiesFile); err != nil || string(body) != originalCookies {
+		t.Fatalf("source cookies changed: %q, %v", body, err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(media.Path), "cookies.txt")); !os.IsNotExist(err) {
+		t.Fatalf("temporary cookies still exist after download: %v", err)
+	}
+}
+
+func TestIsTikTokURL(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]bool{
+		"https://www.tiktok.com/@creator/video/123": true,
+		"https://vt.tiktok.com/example/":            true,
+		"https://TIKTOK.COM./example/":              true,
+		"http://www.tiktok.com/example/":            false,
+		"https://tiktok.com.example.test/example/":  false,
+		"https://example.test/tiktok.com/example/":  false,
+	}
+	for rawURL, want := range tests {
+		if got := isTikTokURL(rawURL); got != want {
+			t.Errorf("isTikTokURL(%q) = %t, want %t", rawURL, got, want)
+		}
+	}
+}
+
+func TestDownloaderNeverReturnsTemporaryCookiesAsMedia(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper is a POSIX shell script")
+	}
+	t.Parallel()
+
+	workDir := t.TempDir()
+	cookiesFile := filepath.Join(workDir, "source-cookies.txt")
+	if err := os.WriteFile(cookiesFile, []byte("cookie-data"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	helper := writeHelper(t, workDir, "#!/bin/sh\nexit 0\n")
+	downloader, err := NewDownloader(DownloaderConfig{
+		Binary: helper, WorkDir: workDir, CookiesFile: cookiesFile,
+		Format: "best", MaxFileSize: 1024, SizeCheckGap: time.Millisecond, Attempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if media, err := downloader.Download(context.Background(), "https://example.test/video"); err == nil {
+		_ = media.Cleanup()
+		t.Fatal("Download() error = nil, want missing media error")
+	}
+}
+
 func TestDownloaderFallsBackToTikTokPhotoHelper(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test helper is a POSIX shell script")

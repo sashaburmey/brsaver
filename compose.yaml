@@ -4,6 +4,10 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      YT_DLP_COOKIES_FILE: /run/secrets/cookies.txt
+    volumes:
+      - ./cookies.txt:/run/secrets/cookies.txt:ro
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=2g,uid=10001,gid=10001

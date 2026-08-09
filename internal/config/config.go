@@ -25,6 +25,7 @@ type Config struct {
 	FFmpegPath         string
 	FFprobePath        string
 	CookiesFile        string
+	TikTokDeviceID     string
 	DownloadDir        string
 	MaxFileSize        int64
 	MaxDownloadSize    int64
@@ -53,6 +54,7 @@ func Load() (Config, error) {
 		FFmpegPath:         envOr("FFMPEG_PATH", "ffmpeg"),
 		FFprobePath:        envOr("FFPROBE_PATH", "ffprobe"),
 		CookiesFile:        strings.TrimSpace(os.Getenv("YT_DLP_COOKIES_FILE")),
+		TikTokDeviceID:     strings.TrimSpace(os.Getenv("TIKTOK_DEVICE_ID")),
 		DownloadDir:        envOr("DOWNLOAD_DIR", filepath.Join(os.TempDir(), "brsaver")),
 	}
 
@@ -123,6 +125,11 @@ func Load() (Config, error) {
 	}
 	if cfg.YTDLPPath == "" || cfg.YTDLPFormat == "" || cfg.TikTokPhotoHelper == "" || cfg.FFmpegPath == "" || cfg.FFprobePath == "" || cfg.DownloadDir == "" {
 		return Config{}, fmt.Errorf("media tool paths, YT_DLP_FORMAT and DOWNLOAD_DIR cannot be empty")
+	}
+	if cfg.TikTokDeviceID != "" {
+		if len(cfg.TikTokDeviceID) != 19 || strings.Trim(cfg.TikTokDeviceID, "0123456789") != "" {
+			return Config{}, fmt.Errorf("TIKTOK_DEVICE_ID must contain exactly 19 digits")
+		}
 	}
 
 	return cfg, nil
