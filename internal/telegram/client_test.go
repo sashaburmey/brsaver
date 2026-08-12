@@ -84,6 +84,48 @@ func TestClientSendVideoAsMultipart(t *testing.T) {
 	}
 }
 
+func TestClientSendAudioAsMultipart(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/bot123:test-token/sendAudio" {
+			t.Errorf("path = %q", request.URL.Path)
+		}
+		if err := request.ParseMultipartForm(1024 * 1024); err != nil {
+			t.Errorf("parse multipart form: %v", err)
+		}
+		for name, want := range map[string]string{
+			"chat_id": "-1001", "message_thread_id": "9", "title": "Track title",
+			"performer": "Track artist", "duration": "208",
+		} {
+			if got := request.FormValue(name); got != want {
+				t.Errorf("%s = %q, want %q", name, got, want)
+			}
+		}
+		file, _, err := request.FormFile("audio")
+		if err != nil {
+			t.Errorf("audio field: %v", err)
+		} else {
+			body, _ := io.ReadAll(file)
+			_ = file.Close()
+			if string(body) != "audio-data" {
+				t.Errorf("audio body = %q", body)
+			}
+		}
+		_, _ = io.WriteString(writer, `{"ok":true,"result":{"message_id":8}}`)
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "track.mp3")
+	if err := os.WriteFile(path, []byte("audio-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := testClient(t, server.URL)
+	if err := client.SendAudio(context.Background(), -1001, 7, 9, path, "Track title", "Track artist", 208); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestClientSendPhotosAsMediaGroup(t *testing.T) {
 	t.Parallel()
 

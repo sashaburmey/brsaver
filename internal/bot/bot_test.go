@@ -60,9 +60,31 @@ func TestHandleSendsDownloadedPhotosWithoutTranscoding(t *testing.T) {
 	}
 }
 
+func TestHandleSendsDownloadedAudioWithoutTranscoding(t *testing.T) {
+	t.Parallel()
+
+	client := &photoTelegramClient{}
+	application := New(client, audioMediaDownloader{}, rejectingTranscoder{}, Config{
+		DownloadTimeout: time.Second, UploadTimeout: time.Second, CompressionTimeout: time.Second,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	application.handle(context.Background(), job{
+		chatID: -1001, messageID: 15, threadID: 9,
+		link: media.Link{URL: "https://open.spotify.com/track/11dFghVXANMlKmJXsNCbNl", Provider: "Spotify"},
+	})
+
+	if client.audioPath != "track.mp3" || client.audioTitle != "Cut to the Feeling" ||
+		client.audioPerformer != "Carly Rae Jepsen" || client.audioDuration != 208 {
+		t.Fatalf("unexpected audio upload: %#v", client)
+	}
+}
+
 type photoTelegramClient struct {
 	chatID, messageID, threadID int64
 	photos                      []string
+	audioPath                   string
+	audioTitle                  string
+	audioPerformer              string
+	audioDuration               int
 }
 
 func (c *photoTelegramClient) GetMe(context.Context) (telegram.User, error) {
@@ -81,6 +103,14 @@ func (c *photoTelegramClient) SendVideo(context.Context, int64, int, int, string
 	return errors.New("unexpected video upload")
 }
 
+func (c *photoTelegramClient) SendAudio(_ context.Context, _ int64, _, _ int, path, title, performer string, duration int) error {
+	c.audioPath = path
+	c.audioTitle = title
+	c.audioPerformer = performer
+	c.audioDuration = duration
+	return nil
+}
+
 func (c *photoTelegramClient) SendPhotos(_ context.Context, chatID int64, messageID, threadID int, paths []string) error {
 	c.chatID = chatID
 	c.messageID = int64(messageID)
@@ -93,6 +123,17 @@ type photoMediaDownloader struct{}
 
 func (photoMediaDownloader) Download(context.Context, string) (*media.DownloadedFile, error) {
 	return &media.DownloadedFile{Photos: []string{"one.jpg", "two.jpg"}}, nil
+}
+
+type audioMediaDownloader struct{}
+
+func (audioMediaDownloader) Download(context.Context, string) (*media.DownloadedFile, error) {
+	return &media.DownloadedFile{
+		Path: "track.mp3",
+		Audio: &media.AudioInfo{
+			Title: "Cut to the Feeling", Performer: "Carly Rae Jepsen", Duration: 208, MatchScore: 105,
+		},
+	}, nil
 }
 
 type rejectingTranscoder struct{}

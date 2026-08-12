@@ -126,6 +126,18 @@ func (c *Client) SendVideo(ctx context.Context, chatID int64, messageID, threadI
 	})
 }
 
+func (c *Client) SendAudio(ctx context.Context, chatID int64, messageID, threadID int, path, title, performer string, duration int) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open audio for upload: %w", err)
+	}
+	defer file.Close()
+
+	return c.doMultipart(ctx, "sendAudio", func(writer *multipart.Writer) error {
+		return writeAudioForm(writer, file, chatID, messageID, threadID, filepath.Base(path), title, performer, duration)
+	})
+}
+
 func (c *Client) SendPhotos(ctx context.Context, chatID int64, messageID, threadID int, paths []string) error {
 	if len(paths) == 0 {
 		return errors.New("at least one photo is required")
@@ -179,6 +191,40 @@ func writeVideoForm(writer *multipart.Writer, file *os.File, chatID int64, messa
 	}
 	_, err = io.Copy(part, file)
 	return err
+}
+
+func writeAudioForm(writer *multipart.Writer, file *os.File, chatID int64, messageID, threadID int, filename, title, performer string, duration int) error {
+	if err := writeUploadFields(writer, chatID, messageID, threadID); err != nil {
+		return err
+	}
+	fields := map[string]string{
+		"title":     truncateRunes(strings.TrimSpace(title), 64),
+		"performer": truncateRunes(strings.TrimSpace(performer), 64),
+	}
+	if duration > 0 {
+		fields["duration"] = strconv.Itoa(duration)
+	}
+	for name, value := range fields {
+		if value != "" {
+			if err := writer.WriteField(name, value); err != nil {
+				return err
+			}
+		}
+	}
+	part, err := writer.CreateFormFile("audio", filename)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(part, file)
+	return err
+}
+
+func truncateRunes(value string, limit int) string {
+	characters := []rune(value)
+	if len(characters) <= limit {
+		return value
+	}
+	return string(characters[:limit])
 }
 
 func writePhotoForm(writer *multipart.Writer, files []*os.File, chatID int64, messageID, threadID int) error {

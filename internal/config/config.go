@@ -25,6 +25,7 @@ type Config struct {
 	FFmpegPath         string
 	FFprobePath        string
 	CookiesFile        string
+	YouTubeCookiesFile string
 	TikTokDeviceID     string
 	DownloadDir        string
 	MaxFileSize        int64
@@ -54,6 +55,7 @@ func Load() (Config, error) {
 		FFmpegPath:         envOr("FFMPEG_PATH", "ffmpeg"),
 		FFprobePath:        envOr("FFPROBE_PATH", "ffprobe"),
 		CookiesFile:        strings.TrimSpace(os.Getenv("YT_DLP_COOKIES_FILE")),
+		YouTubeCookiesFile: strings.TrimSpace(os.Getenv("YT_DLP_YOUTUBE_COOKIES_FILE")),
 		TikTokDeviceID:     strings.TrimSpace(os.Getenv("TIKTOK_DEVICE_ID")),
 		DownloadDir:        envOr("DOWNLOAD_DIR", filepath.Join(os.TempDir(), "brsaver")),
 	}

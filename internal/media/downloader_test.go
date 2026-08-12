@@ -172,6 +172,60 @@ printf '%s\n' "$dir/test.mp4"
 	}
 }
 
+func TestDownloaderUsesSeparateYouTubeCookies(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper is a POSIX shell script")
+	}
+	t.Parallel()
+
+	workDir := t.TempDir()
+	generalCookies := filepath.Join(workDir, "general-source-cookies.txt")
+	youTubeCookies := filepath.Join(workDir, "youtube-source-cookies.txt")
+	if err := os.WriteFile(generalCookies, []byte("general-cookie-data"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	const originalYouTubeCookies = "youtube-cookie-data"
+	if err := os.WriteFile(youTubeCookies, []byte(originalYouTubeCookies), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	helper := writeHelper(t, workDir, `#!/bin/sh
+dir=""
+cookies=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--paths" ]; then dir="$argument"; fi
+  if [ "$previous" = "--cookies" ]; then cookies="$argument"; fi
+  previous="$argument"
+done
+[ -n "$cookies" ] || exit 10
+[ "$cookies" != "`+youTubeCookies+`" ] || exit 11
+[ "$(cat "$cookies")" = "youtube-cookie-data" ] || exit 12
+printf '# refreshed\n' >> "$cookies" || exit 13
+printf 'video-data' > "$dir/test.mp4"
+printf '%s\n' "$dir/test.mp4"
+`)
+	downloader, err := NewDownloader(DownloaderConfig{
+		Binary: helper, WorkDir: workDir, CookiesFile: generalCookies,
+		YouTubeCookiesFile: youTubeCookies, Format: "best", MaxFileSize: 1024,
+		SizeCheckGap: time.Millisecond, Attempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	media, err := downloader.Download(context.Background(), "https://www.youtube.com/shorts/2EG9B92agKY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer media.Cleanup()
+	if body, err := os.ReadFile(youTubeCookies); err != nil || string(body) != originalYouTubeCookies {
+		t.Fatalf("source YouTube cookies changed: %q, %v", body, err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(media.Path), "youtube-cookies.txt")); !os.IsNotExist(err) {
+		t.Fatalf("temporary YouTube cookies still exist: %v", err)
+	}
+}
+
 func TestIsTikTokURL(t *testing.T) {
 	t.Parallel()
 
@@ -186,6 +240,22 @@ func TestIsTikTokURL(t *testing.T) {
 	for rawURL, want := range tests {
 		if got := isTikTokURL(rawURL); got != want {
 			t.Errorf("isTikTokURL(%q) = %t, want %t", rawURL, got, want)
+		}
+	}
+}
+
+func TestIsYouTubeURL(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]bool{
+		"https://www.youtube.com/shorts/abc": true,
+		"https://youtu.be/abc":               true,
+		"http://www.youtube.com/shorts/abc":  false,
+		"https://youtube.com.example/abc":    false,
+	}
+	for rawURL, want := range tests {
+		if got := isYouTubeURL(rawURL); got != want {
+			t.Errorf("isYouTubeURL(%q) = %t, want %t", rawURL, got, want)
 		}
 	}
 }

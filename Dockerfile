@@ -23,7 +23,7 @@ RUN apt-get update && \
     chown brsaver:brsaver /tmp/brsaver
 
 COPY --from=builder /out/brsaver /usr/local/bin/brsaver
-COPY --chmod=0755 scripts/brsaver_tiktok_photos.py /usr/local/bin/brsaver-tiktok-photos
+COPY scripts/brsaver_tiktok_photos.py /usr/local/bin/brsaver-tiktok-photos
 
 USER brsaver
 ENTRYPOINT ["/usr/local/bin/brsaver"]

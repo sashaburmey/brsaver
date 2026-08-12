@@ -6,8 +6,10 @@ services:
       - .env
     environment:
       YT_DLP_COOKIES_FILE: /run/secrets/cookies.txt
+      YT_DLP_YOUTUBE_COOKIES_FILE: /run/secrets/youtube-cookies.txt
     volumes:
       - ./cookies.txt:/run/secrets/cookies.txt:ro
+      - ./youtube-cookies.txt:/run/secrets/youtube-cookies.txt:ro
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=2g,uid=10001,gid=10001

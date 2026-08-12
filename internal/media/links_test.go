@@ -44,6 +44,18 @@ func TestExtractLinks(t *testing.T) {
 			wantURL:  "https://www.facebook.com/share/r/AbCd/",
 			provider: "Facebook",
 		},
+		{
+			name:     "Spotify track",
+			text:     "https://open.spotify.com/track/11dFghVXANMlKmJXsNCbNl?si=tracking",
+			wantURL:  "https://open.spotify.com/track/11dFghVXANMlKmJXsNCbNl",
+			provider: "Spotify",
+		},
+		{
+			name:     "Spotify localized track",
+			text:     "https://open.spotify.com/intl-uk/track/11dFghVXANMlKmJXsNCbNl",
+			wantURL:  "https://open.spotify.com/track/11dFghVXANMlKmJXsNCbNl",
+			provider: "Spotify",
+		},
 	}
 
 	for _, test := range tests {
@@ -82,7 +94,7 @@ func TestExtractLinksUsesTelegramUTF16Offsets(t *testing.T) {
 func TestExtractLinksRejectsUnsupportedOrUnsafeURLs(t *testing.T) {
 	t.Parallel()
 
-	text := "https://youtube.com/watch?v=regular https://evil.example/reel/1 https://instagram.com:8080/reel/1"
+	text := "https://youtube.com/watch?v=regular https://evil.example/reel/1 https://instagram.com:8080/reel/1 https://open.spotify.com/album/11dFghVXANMlKmJXsNCbNl https://open.spotify.com/track/not-an-id"
 	if got := ExtractLinks(text, nil); len(got) != 0 {
 		t.Fatalf("got unsupported links: %#v", got)
 	}

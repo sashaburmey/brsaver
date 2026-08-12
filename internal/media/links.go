@@ -74,12 +74,44 @@ func supportedLink(raw string) (Link, bool) {
 		provider = "Facebook"
 	case hostMatches(host, "facebook.com") && (hasAnyPrefix(path, "/reel/", "/reels/", "/watch", "/share/r/", "/share/v/") || strings.Contains(path, "/videos/")):
 		provider = "Facebook"
+	case host == "open.spotify.com" && spotifyTrackID(parsed) != "":
+		provider = "Spotify"
 	default:
 		return Link{}, false
 	}
 
 	parsed.Fragment = ""
+	if provider == "Spotify" {
+		parsed.Scheme = "https"
+		parsed.Host = "open.spotify.com"
+		parsed.Path = "/track/" + spotifyTrackID(parsed)
+		parsed.RawPath = ""
+		parsed.RawQuery = ""
+	}
 	return Link{URL: parsed.String(), Provider: provider}, true
+}
+
+func spotifyTrackID(parsed *url.URL) string {
+	if parsed == nil || strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".") != "open.spotify.com" {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) == 3 && strings.HasPrefix(strings.ToLower(parts[0]), "intl-") {
+		parts = parts[1:]
+	}
+	if len(parts) != 2 || strings.ToLower(parts[0]) != "track" || len(parts[1]) != 22 {
+		return ""
+	}
+	for _, character := range parts[1] {
+		if character < '0' || character > '9' {
+			if character < 'A' || character > 'Z' {
+				if character < 'a' || character > 'z' {
+					return ""
+				}
+			}
+		}
+	}
+	return parts[1]
 }
 
 func hostMatches(host, domain string) bool {

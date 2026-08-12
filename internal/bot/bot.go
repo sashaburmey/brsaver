@@ -30,6 +30,7 @@ type telegramClient interface {
 	GetUpdates(context.Context, int64) ([]telegram.Update, error)
 	SendText(context.Context, int64, int, int, string) error
 	SendVideo(context.Context, int64, int, int, string) error
+	SendAudio(context.Context, int64, int, int, string, string, string, int) error
 	SendPhotos(context.Context, int64, int, int, []string) error
 }
 
@@ -188,6 +189,23 @@ func (b *Bot) handle(ctx context.Context, item job) {
 			return
 		}
 		logger.Info("photo album sent", "photo_count", len(file.Photos))
+		return
+	}
+	if file.Audio != nil {
+		uploadCtx, cancelUpload := context.WithTimeout(ctx, b.config.UploadTimeout)
+		err = b.telegram.SendAudio(
+			uploadCtx, item.chatID, item.messageID, item.threadID, file.Path,
+			file.Audio.Title, file.Audio.Performer, file.Audio.Duration,
+		)
+		cancelUpload()
+		if err != nil {
+			if ctx.Err() == nil {
+				logger.Error("audio upload failed", "error", err)
+				b.notifyError(ctx, item)
+			}
+			return
+		}
+		logger.Info("audio sent", "match_score", file.Audio.MatchScore)
 		return
 	}
 

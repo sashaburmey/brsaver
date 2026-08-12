@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -18,7 +19,10 @@ import (
 	"time"
 )
 
-var ErrFileTooLarge = errors.New("downloaded media exceeds the configured size limit")
+var (
+	ErrFileTooLarge         = errors.New("downloaded media exceeds the configured size limit")
+	ErrNoReliableAudioMatch = errors.New("no sufficiently reliable audio match")
+)
 
 const (
 	defaultTikTokPhotoHelper = "brsaver-tiktok-photos"
@@ -29,34 +33,41 @@ const (
 var tiktokPhotoURLPattern = regexp.MustCompile(`https://www\.tiktok\.com/@[^/\s]+/photo/[0-9]+[^\s]*`)
 
 type DownloaderConfig struct {
-	Binary         string
-	WorkDir        string
-	CookiesFile    string
-	TikTokDeviceID string
-	Format         string
-	MaxFileSize    int64
-	SizeCheckGap   time.Duration
-	Attempts       int
-	RetryDelay     time.Duration
-	PhotoHelper    string
+	Binary             string
+	WorkDir            string
+	CookiesFile        string
+	YouTubeCookiesFile string
+	TikTokDeviceID     string
+	Format             string
+	MaxFileSize        int64
+	MaxAudioFileSize   int64
+	SizeCheckGap       time.Duration
+	Attempts           int
+	RetryDelay         time.Duration
+	PhotoHelper        string
 }
 
 type Downloader struct {
-	binary         string
-	workDir        string
-	cookiesFile    string
-	tikTokDeviceID string
-	format         string
-	maxFileSize    int64
-	sizeCheckGap   time.Duration
-	attempts       int
-	retryDelay     time.Duration
-	photoHelper    string
+	binary             string
+	workDir            string
+	cookiesFile        string
+	youTubeCookiesFile string
+	tikTokDeviceID     string
+	format             string
+	maxFileSize        int64
+	maxAudioFileSize   int64
+	sizeCheckGap       time.Duration
+	attempts           int
+	retryDelay         time.Duration
+	photoHelper        string
+	httpClient         *http.Client
+	tikTokHTTPClient   *http.Client
 }
 
 type DownloadedFile struct {
 	Path   string
 	Photos []string
+	Audio  *AudioInfo
 	dir    string
 	once   sync.Once
 	err    error
@@ -68,6 +79,9 @@ func NewDownloader(cfg DownloaderConfig) (*Downloader, error) {
 	}
 	if cfg.MaxFileSize <= 0 {
 		return nil, errors.New("maximum file size must be positive")
+	}
+	if cfg.MaxAudioFileSize <= 0 || cfg.MaxAudioFileSize > cfg.MaxFileSize {
+		cfg.MaxAudioFileSize = cfg.MaxFileSize
 	}
 	if cfg.SizeCheckGap <= 0 {
 		cfg.SizeCheckGap = 500 * time.Millisecond
@@ -85,16 +99,20 @@ func NewDownloader(cfg DownloaderConfig) (*Downloader, error) {
 		return nil, fmt.Errorf("create download directory: %w", err)
 	}
 	return &Downloader{
-		binary:         cfg.Binary,
-		workDir:        cfg.WorkDir,
-		cookiesFile:    cfg.CookiesFile,
-		tikTokDeviceID: cfg.TikTokDeviceID,
-		format:         cfg.Format,
-		maxFileSize:    cfg.MaxFileSize,
-		sizeCheckGap:   cfg.SizeCheckGap,
-		attempts:       cfg.Attempts,
-		retryDelay:     cfg.RetryDelay,
-		photoHelper:    cfg.PhotoHelper,
+		binary:             cfg.Binary,
+		workDir:            cfg.WorkDir,
+		cookiesFile:        cfg.CookiesFile,
+		youTubeCookiesFile: cfg.YouTubeCookiesFile,
+		tikTokDeviceID:     cfg.TikTokDeviceID,
+		format:             cfg.Format,
+		maxFileSize:        cfg.MaxFileSize,
+		maxAudioFileSize:   cfg.MaxAudioFileSize,
+		sizeCheckGap:       cfg.SizeCheckGap,
+		attempts:           cfg.Attempts,
+		retryDelay:         cfg.RetryDelay,
+		photoHelper:        cfg.PhotoHelper,
+		httpClient:         newSpotifyHTTPClient(),
+		tikTokHTTPClient:   newTikTokHTTPClient(),
 	}, nil
 }
 
@@ -106,7 +124,7 @@ func (d *Downloader) Download(ctx context.Context, rawURL string) (*DownloadedFi
 			return file, nil
 		}
 		lastErr = err
-		if ctx.Err() != nil || errors.Is(err, ErrFileTooLarge) || attempt == d.attempts {
+		if ctx.Err() != nil || errors.Is(err, ErrFileTooLarge) || errors.Is(err, ErrNoReliableAudioMatch) || attempt == d.attempts {
 			break
 		}
 
@@ -124,6 +142,13 @@ func (d *Downloader) Download(ctx context.Context, rawURL string) (*DownloadedFi
 }
 
 func (d *Downloader) downloadOnce(ctx context.Context, rawURL string) (_ *DownloadedFile, resultErr error) {
+	if isSpotifyTrackURL(rawURL) {
+		return d.downloadSpotifyTrackOnce(ctx, rawURL)
+	}
+	return d.downloadVideoOnce(ctx, rawURL)
+}
+
+func (d *Downloader) downloadVideoOnce(ctx context.Context, rawURL string) (_ *DownloadedFile, resultErr error) {
 	dir, err := os.MkdirTemp(d.workDir, "job-")
 	if err != nil {
 		return nil, fmt.Errorf("create job directory: %w", err)
@@ -137,7 +162,7 @@ func (d *Downloader) downloadOnce(ctx context.Context, rawURL string) (_ *Downlo
 		}
 	}()
 
-	cookiesFile, err := d.copyCookies(dir)
+	cookiesFile, err := d.copyCookiesForURL(dir, rawURL)
 	if err != nil {
 		return nil, err
 	}
@@ -237,15 +262,34 @@ func (d *Downloader) downloadOnce(ctx context.Context, rawURL string) (_ *Downlo
 			detail = err.Error()
 		}
 		if photoURL := extractTikTokPhotoURL(detail); photoURL != "" {
-			photos, photoErr := d.downloadTikTokPhotos(ctx, photoURL, dir, cookiesFile)
-			if photoErr == nil {
+			photos, playerErr := d.downloadTikTokPlayerPhotos(ctx, photoURL, dir)
+			if playerErr == nil {
 				keep = true
 				return &DownloadedFile{Photos: photos, dir: dir}, nil
 			}
-			return nil, photoErr
+			photos, helperErr := d.downloadTikTokPhotos(ctx, photoURL, dir, cookiesFile)
+			if helperErr == nil {
+				keep = true
+				return &DownloadedFile{Photos: photos, dir: dir}, nil
+			}
+			return nil, fmt.Errorf("TikTok player photo fallback failed: %v; %w", playerErr, helperErr)
 		}
-		detail = strings.ReplaceAll(detail, rawURL, "[URL]")
-		return nil, fmt.Errorf("yt-dlp failed: %s", detail)
+		if isTikTokURL(rawURL) {
+			path, fallbackErr := d.downloadTikTokPlayerVideo(ctx, rawURL, detail, dir)
+			if fallbackErr == nil {
+				stdout.Reset()
+				_, _ = fmt.Fprintln(&stdout, path)
+			} else {
+				if errors.Is(fallbackErr, ErrFileTooLarge) {
+					return nil, fallbackErr
+				}
+				detail = strings.ReplaceAll(detail, rawURL, "[URL]")
+				return nil, fmt.Errorf("yt-dlp failed: %s; TikTok player fallback failed: %w", detail, fallbackErr)
+			}
+		} else {
+			detail = strings.ReplaceAll(detail, rawURL, "[URL]")
+			return nil, fmt.Errorf("yt-dlp failed: %s", detail)
+		}
 	}
 	if cookiesFile != "" {
 		if err := os.Remove(cookiesFile); err != nil {
@@ -276,11 +320,22 @@ func (d *Downloader) downloadOnce(ctx context.Context, rawURL string) (_ *Downlo
 }
 
 func (d *Downloader) copyCookies(dir string) (string, error) {
-	if d.cookiesFile == "" {
+	return copyCookieFile(d.cookiesFile, dir, "cookies.txt")
+}
+
+func (d *Downloader) copyCookiesForURL(dir, rawURL string) (string, error) {
+	if isYouTubeURL(rawURL) && d.youTubeCookiesFile != "" {
+		return copyCookieFile(d.youTubeCookiesFile, dir, "youtube-cookies.txt")
+	}
+	return d.copyCookies(dir)
+}
+
+func copyCookieFile(sourcePath, dir, filename string) (string, error) {
+	if sourcePath == "" {
 		return "", nil
 	}
 
-	source, err := os.Open(d.cookiesFile)
+	source, err := os.Open(sourcePath)
 	if err != nil {
 		return "", fmt.Errorf("open cookies file: %w", err)
 	}
@@ -294,7 +349,7 @@ func (d *Downloader) copyCookies(dir string) (string, error) {
 		return "", errors.New("cookies file is not a regular file")
 	}
 
-	path := filepath.Join(dir, "cookies.txt")
+	path := filepath.Join(dir, filename)
 	target, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("create temporary cookies file: %w", err)
@@ -458,6 +513,15 @@ func isTikTokURL(rawURL string) bool {
 	}
 	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
 	return host == "tiktok.com" || strings.HasSuffix(host, ".tiktok.com")
+}
+
+func isYouTubeURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	return hostMatches(host, "youtube.com") || host == "youtu.be"
 }
 
 func directorySize(dir string) (int64, error) {
