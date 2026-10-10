@@ -132,7 +132,7 @@ func (d *Downloader) downloadSpotifyTrackOnce(ctx context.Context, rawURL string
 		"--no-playlist",
 		"--no-progress",
 		"--no-warnings",
-		"--max-filesize", strconv.FormatInt(d.maxAudioFileSize, 10),
+		"--max-filesize", strconv.FormatInt(d.maxUploadSize, 10),
 		"--format", "bestaudio[ext=m4a]/bestaudio/best",
 		"--extract-audio",
 		"--audio-format", "mp3",
@@ -170,7 +170,7 @@ func (d *Downloader) downloadSpotifyTrackOnce(ctx context.Context, rawURL string
 	if !info.Mode().IsRegular() || info.Size() <= 0 {
 		return nil, errors.New("downloaded Spotify audio is not a non-empty regular file")
 	}
-	if info.Size() > d.maxAudioFileSize {
+	if info.Size() > d.maxUploadSize {
 		return nil, ErrFileTooLarge
 	}
 	if strings.ToLower(filepath.Ext(path)) != ".mp3" {
@@ -557,7 +557,7 @@ func (d *Downloader) runSpotifyDownloadCommand(ctx context.Context, dir string, 
 				<-wait
 				return stdout.String(), stderr.String(), err
 			}
-			if size > d.maxAudioFileSize*2 {
+			if size > d.maxUploadSize*2 {
 				cancel()
 				<-wait
 				return stdout.String(), stderr.String(), ErrFileTooLarge

@@ -17,11 +17,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"brsaver/internal/telegram"
 )
 
 var (
 	ErrFileTooLarge         = errors.New("downloaded media exceeds the configured size limit")
 	ErrNoReliableAudioMatch = errors.New("no sufficiently reliable audio match")
+	ErrNoMedia              = errors.New("post does not contain downloadable photos or videos")
 )
 
 const (
@@ -40,7 +43,7 @@ type DownloaderConfig struct {
 	TikTokDeviceID     string
 	Format             string
 	MaxFileSize        int64
-	MaxAudioFileSize   int64
+	MaxUploadSize      int64
 	SizeCheckGap       time.Duration
 	Attempts           int
 	RetryDelay         time.Duration
@@ -55,22 +58,23 @@ type Downloader struct {
 	tikTokDeviceID     string
 	format             string
 	maxFileSize        int64
-	maxAudioFileSize   int64
+	maxUploadSize      int64
 	sizeCheckGap       time.Duration
 	attempts           int
 	retryDelay         time.Duration
 	photoHelper        string
 	httpClient         *http.Client
 	tikTokHTTPClient   *http.Client
+	threadsHTTPClient  *http.Client
 }
 
 type DownloadedFile struct {
-	Path   string
-	Photos []string
-	Audio  *AudioInfo
-	dir    string
-	once   sync.Once
-	err    error
+	Path  string
+	Album []telegram.AlbumItem
+	Audio *AudioInfo
+	dir   string
+	once  sync.Once
+	err   error
 }
 
 func NewDownloader(cfg DownloaderConfig) (*Downloader, error) {
@@ -80,8 +84,8 @@ func NewDownloader(cfg DownloaderConfig) (*Downloader, error) {
 	if cfg.MaxFileSize <= 0 {
 		return nil, errors.New("maximum file size must be positive")
 	}
-	if cfg.MaxAudioFileSize <= 0 || cfg.MaxAudioFileSize > cfg.MaxFileSize {
-		cfg.MaxAudioFileSize = cfg.MaxFileSize
+	if cfg.MaxUploadSize <= 0 || cfg.MaxUploadSize > cfg.MaxFileSize {
+		cfg.MaxUploadSize = cfg.MaxFileSize
 	}
 	if cfg.SizeCheckGap <= 0 {
 		cfg.SizeCheckGap = 500 * time.Millisecond
@@ -106,13 +110,14 @@ func NewDownloader(cfg DownloaderConfig) (*Downloader, error) {
 		tikTokDeviceID:     cfg.TikTokDeviceID,
 		format:             cfg.Format,
 		maxFileSize:        cfg.MaxFileSize,
-		maxAudioFileSize:   cfg.MaxAudioFileSize,
+		maxUploadSize:      cfg.MaxUploadSize,
 		sizeCheckGap:       cfg.SizeCheckGap,
 		attempts:           cfg.Attempts,
 		retryDelay:         cfg.RetryDelay,
 		photoHelper:        cfg.PhotoHelper,
 		httpClient:         newSpotifyHTTPClient(),
 		tikTokHTTPClient:   newTikTokHTTPClient(),
+		threadsHTTPClient:  newThreadsHTTPClient(),
 	}, nil
 }
 
@@ -124,7 +129,8 @@ func (d *Downloader) Download(ctx context.Context, rawURL string) (*DownloadedFi
 			return file, nil
 		}
 		lastErr = err
-		if ctx.Err() != nil || errors.Is(err, ErrFileTooLarge) || errors.Is(err, ErrNoReliableAudioMatch) || attempt == d.attempts {
+		if ctx.Err() != nil || errors.Is(err, ErrFileTooLarge) || errors.Is(err, ErrNoReliableAudioMatch) ||
+			errors.Is(err, ErrNoMedia) || attempt == d.attempts {
 			break
 		}
 
@@ -144,6 +150,9 @@ func (d *Downloader) Download(ctx context.Context, rawURL string) (*DownloadedFi
 func (d *Downloader) downloadOnce(ctx context.Context, rawURL string) (_ *DownloadedFile, resultErr error) {
 	if isSpotifyTrackURL(rawURL) {
 		return d.downloadSpotifyTrackOnce(ctx, rawURL)
+	}
+	if isThreadsPostURL(rawURL) {
+		return d.downloadThreadsPostOnce(ctx, rawURL)
 	}
 	return d.downloadVideoOnce(ctx, rawURL)
 }
@@ -265,12 +274,12 @@ func (d *Downloader) downloadVideoOnce(ctx context.Context, rawURL string) (_ *D
 			photos, playerErr := d.downloadTikTokPlayerPhotos(ctx, photoURL, dir)
 			if playerErr == nil {
 				keep = true
-				return &DownloadedFile{Photos: photos, dir: dir}, nil
+				return &DownloadedFile{Album: photoAlbum(photos), dir: dir}, nil
 			}
 			photos, helperErr := d.downloadTikTokPhotos(ctx, photoURL, dir, cookiesFile)
 			if helperErr == nil {
 				keep = true
-				return &DownloadedFile{Photos: photos, dir: dir}, nil
+				return &DownloadedFile{Album: photoAlbum(photos), dir: dir}, nil
 			}
 			return nil, fmt.Errorf("TikTok player photo fallback failed: %v; %w", playerErr, helperErr)
 		}
@@ -435,6 +444,14 @@ func (d *Downloader) downloadTikTokPhotos(ctx context.Context, photoURL, dir, co
 		paths = append(paths, path)
 	}
 	return paths, nil
+}
+
+func photoAlbum(paths []string) []telegram.AlbumItem {
+	album := make([]telegram.AlbumItem, 0, len(paths))
+	for _, path := range paths {
+		album = append(album, telegram.AlbumItem{Path: path})
+	}
+	return album
 }
 
 func extractTikTokPhotoURL(detail string) string {

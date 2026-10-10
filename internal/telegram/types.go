@@ -34,3 +34,8 @@ type User struct {
 	FirstName string `json:"first_name"`
 	Username  string `json:"username,omitempty"`
 }
+
+type AlbumItem struct {
+	Path  string
+	Video bool
+}

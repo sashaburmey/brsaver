@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -55,7 +56,7 @@ func TestHandleSendsDownloadedPhotosWithoutTranscoding(t *testing.T) {
 		link: media.Link{URL: "https://vt.tiktok.com/example/", Provider: "TikTok"},
 	})
 
-	if len(client.photos) != 2 || client.chatID != -1001 || client.messageID != 15 || client.threadID != 9 {
+	if len(client.album) != 2 || client.chatID != -1001 || client.messageID != 15 || client.threadID != 9 {
 		t.Fatalf("unexpected photo upload: %#v", client)
 	}
 }
@@ -78,9 +79,27 @@ func TestHandleSendsDownloadedAudioWithoutTranscoding(t *testing.T) {
 	}
 }
 
+func TestHandleSkipsPostsWithoutMediaSilently(t *testing.T) {
+	t.Parallel()
+
+	client := &photoTelegramClient{}
+	application := New(client, noMediaDownloader{}, rejectingTranscoder{}, Config{
+		DownloadTimeout: time.Second, UploadTimeout: time.Second, CompressionTimeout: time.Second, NotifyErrors: true,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	application.handle(context.Background(), job{
+		chatID: -1001, messageID: 15,
+		link: media.Link{URL: "https://www.threads.com/t/TextPost01", Provider: "Threads"},
+	})
+
+	if client.texts != 0 || len(client.album) != 0 {
+		t.Fatalf("unexpected reply to a post without media: %#v", client)
+	}
+}
+
 type photoTelegramClient struct {
+	texts                       int
 	chatID, messageID, threadID int64
-	photos                      []string
+	album                       []telegram.AlbumItem
 	audioPath                   string
 	audioTitle                  string
 	audioPerformer              string
@@ -97,7 +116,10 @@ func (c *photoTelegramClient) GetUpdates(context.Context, int64) ([]telegram.Upd
 	return nil, nil
 }
 
-func (c *photoTelegramClient) SendText(context.Context, int64, int, int, string) error { return nil }
+func (c *photoTelegramClient) SendText(context.Context, int64, int, int, string) error {
+	c.texts++
+	return nil
+}
 
 func (c *photoTelegramClient) SendVideo(context.Context, int64, int, int, string) error {
 	return errors.New("unexpected video upload")
@@ -111,18 +133,24 @@ func (c *photoTelegramClient) SendAudio(_ context.Context, _ int64, _, _ int, pa
 	return nil
 }
 
-func (c *photoTelegramClient) SendPhotos(_ context.Context, chatID int64, messageID, threadID int, paths []string) error {
+func (c *photoTelegramClient) SendAlbum(_ context.Context, chatID int64, messageID, threadID int, items []telegram.AlbumItem) error {
 	c.chatID = chatID
 	c.messageID = int64(messageID)
 	c.threadID = int64(threadID)
-	c.photos = append([]string(nil), paths...)
+	c.album = append([]telegram.AlbumItem(nil), items...)
 	return nil
 }
 
 type photoMediaDownloader struct{}
 
 func (photoMediaDownloader) Download(context.Context, string) (*media.DownloadedFile, error) {
-	return &media.DownloadedFile{Photos: []string{"one.jpg", "two.jpg"}}, nil
+	return &media.DownloadedFile{Album: []telegram.AlbumItem{{Path: "one.jpg"}, {Path: "two.jpg"}}}, nil
+}
+
+type noMediaDownloader struct{}
+
+func (noMediaDownloader) Download(context.Context, string) (*media.DownloadedFile, error) {
+	return nil, fmt.Errorf("download failed after 1 attempts: %w", media.ErrNoMedia)
 }
 
 type audioMediaDownloader struct{}

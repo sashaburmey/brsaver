@@ -51,6 +51,24 @@ func TestExtractLinks(t *testing.T) {
 			provider: "Spotify",
 		},
 		{
+			name:     "Threads post",
+			text:     "https://www.threads.com/@zuck/post/C-vecXJSES6?xmt=AQF0",
+			wantURL:  "https://www.threads.com/@zuck/post/C-vecXJSES6?xmt=AQF0",
+			provider: "Threads",
+		},
+		{
+			name:     "Threads legacy domain",
+			text:     "www.threads.net/@nasa/post/DeMqtuYgkaL",
+			wantURL:  "https://www.threads.net/@nasa/post/DeMqtuYgkaL",
+			provider: "Threads",
+		},
+		{
+			name:     "Threads short link",
+			text:     "https://threads.net/t/C-vecXJSES6",
+			wantURL:  "https://threads.net/t/C-vecXJSES6",
+			provider: "Threads",
+		},
+		{
 			name:     "Spotify localized track",
 			text:     "https://open.spotify.com/intl-uk/track/11dFghVXANMlKmJXsNCbNl",
 			wantURL:  "https://open.spotify.com/track/11dFghVXANMlKmJXsNCbNl",
@@ -94,7 +112,8 @@ func TestExtractLinksUsesTelegramUTF16Offsets(t *testing.T) {
 func TestExtractLinksRejectsUnsupportedOrUnsafeURLs(t *testing.T) {
 	t.Parallel()
 
-	text := "https://youtube.com/watch?v=regular https://evil.example/reel/1 https://instagram.com:8080/reel/1 https://open.spotify.com/album/11dFghVXANMlKmJXsNCbNl https://open.spotify.com/track/not-an-id"
+	text := "https://youtube.com/watch?v=regular https://evil.example/reel/1 https://instagram.com:8080/reel/1 https://open.spotify.com/album/11dFghVXANMlKmJXsNCbNl https://open.spotify.com/track/not-an-id " +
+		"https://www.threads.com/@zuck https://www.threads.com/@zuck/post/bad%2Fcode https://threads.example/@zuck/post/C-vecXJSES6"
 	if got := ExtractLinks(text, nil); len(got) != 0 {
 		t.Fatalf("got unsupported links: %#v", got)
 	}

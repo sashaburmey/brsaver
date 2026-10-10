@@ -138,28 +138,33 @@ func (c *Client) SendAudio(ctx context.Context, chatID int64, messageID, threadI
 	})
 }
 
-func (c *Client) SendPhotos(ctx context.Context, chatID int64, messageID, threadID int, paths []string) error {
-	if len(paths) == 0 {
-		return errors.New("at least one photo is required")
+// SendAlbum sends photos and videos as Telegram albums of at most ten items.
+// A batch with a single item is sent as an ordinary photo or video.
+func (c *Client) SendAlbum(ctx context.Context, chatID int64, messageID, threadID int, items []AlbumItem) error {
+	if len(items) == 0 {
+		return errors.New("at least one album item is required")
 	}
-	for start := 0; start < len(paths); start += maxMediaGroupSize {
-		end := min(start+maxMediaGroupSize, len(paths))
-		if err := c.sendPhotoBatch(ctx, chatID, messageID, threadID, paths[start:end]); err != nil {
-			return fmt.Errorf("send photo batch %d: %w", start/maxMediaGroupSize+1, err)
+	for start := 0; start < len(items); start += maxMediaGroupSize {
+		end := min(start+maxMediaGroupSize, len(items))
+		if err := c.sendAlbumBatch(ctx, chatID, messageID, threadID, items[start:end]); err != nil {
+			return fmt.Errorf("send album batch %d: %w", start/maxMediaGroupSize+1, err)
 		}
 	}
 	return nil
 }
 
-func (c *Client) sendPhotoBatch(ctx context.Context, chatID int64, messageID, threadID int, paths []string) error {
-	files := make([]*os.File, 0, len(paths))
-	for _, path := range paths {
-		file, err := os.Open(path)
+func (c *Client) sendAlbumBatch(ctx context.Context, chatID int64, messageID, threadID int, items []AlbumItem) error {
+	if len(items) == 1 && items[0].Video {
+		return c.SendVideo(ctx, chatID, messageID, threadID, items[0].Path)
+	}
+	files := make([]*os.File, 0, len(items))
+	for _, item := range items {
+		file, err := os.Open(item.Path)
 		if err != nil {
 			for _, opened := range files {
 				_ = opened.Close()
 			}
-			return fmt.Errorf("open photo for upload: %w", err)
+			return fmt.Errorf("open album item for upload: %w", err)
 		}
 		files = append(files, file)
 	}
@@ -174,7 +179,7 @@ func (c *Client) sendPhotoBatch(ctx context.Context, chatID int64, messageID, th
 		method = "sendPhoto"
 	}
 	return c.doMultipart(ctx, method, func(writer *multipart.Writer) error {
-		return writePhotoForm(writer, files, chatID, messageID, threadID)
+		return writeAlbumForm(writer, items, files, chatID, messageID, threadID)
 	})
 }
 
@@ -227,7 +232,7 @@ func truncateRunes(value string, limit int) string {
 	return string(characters[:limit])
 }
 
-func writePhotoForm(writer *multipart.Writer, files []*os.File, chatID int64, messageID, threadID int) error {
+func writeAlbumForm(writer *multipart.Writer, items []AlbumItem, files []*os.File, chatID int64, messageID, threadID int) error {
 	if err := writeUploadFields(writer, chatID, messageID, threadID); err != nil {
 		return err
 	}
@@ -240,12 +245,16 @@ func writePhotoForm(writer *multipart.Writer, files []*os.File, chatID int64, me
 		return err
 	}
 
-	media := make([]map[string]string, 0, len(files))
-	for index := range files {
-		media = append(media, map[string]string{
-			"type":  "photo",
-			"media": "attach://photo" + strconv.Itoa(index),
-		})
+	media := make([]map[string]any, 0, len(files))
+	for index, item := range items {
+		entry := map[string]any{
+			"type":  albumItemType(item),
+			"media": "attach://" + albumFieldName(item, index),
+		}
+		if item.Video {
+			entry["supports_streaming"] = true
+		}
+		media = append(media, entry)
 	}
 	encodedMedia, err := json.Marshal(media)
 	if err != nil {
@@ -255,7 +264,7 @@ func writePhotoForm(writer *multipart.Writer, files []*os.File, chatID int64, me
 		return err
 	}
 	for index, file := range files {
-		part, err := writer.CreateFormFile("photo"+strconv.Itoa(index), filepath.Base(file.Name()))
+		part, err := writer.CreateFormFile(albumFieldName(items[index], index), filepath.Base(file.Name()))
 		if err != nil {
 			return err
 		}
@@ -264,6 +273,17 @@ func writePhotoForm(writer *multipart.Writer, files []*os.File, chatID int64, me
 		}
 	}
 	return nil
+}
+
+func albumItemType(item AlbumItem) string {
+	if item.Video {
+		return "video"
+	}
+	return "photo"
+}
+
+func albumFieldName(item AlbumItem, index int) string {
+	return albumItemType(item) + strconv.Itoa(index)
 }
 
 func writeUploadFields(writer *multipart.Writer, chatID int64, messageID, threadID int) error {

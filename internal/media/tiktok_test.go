@@ -129,18 +129,18 @@ exit 1
 	if requestCount != 3 {
 		t.Fatalf("request count = %d, want 3", requestCount)
 	}
-	if len(media.Photos) != 2 {
-		t.Fatalf("photo count = %d, want 2", len(media.Photos))
+	if len(media.Album) != 2 {
+		t.Fatalf("photo count = %d, want 2", len(media.Album))
 	}
 	for index, want := range [][]byte{firstPhoto, secondPhoto} {
-		if filepath.Ext(media.Photos[index]) != ".jpg" {
-			t.Errorf("photo path = %q", media.Photos[index])
+		if filepath.Ext(media.Album[index].Path) != ".jpg" || media.Album[index].Video {
+			t.Errorf("photo item = %#v", media.Album[index])
 		}
-		if body, readErr := os.ReadFile(media.Photos[index]); readErr != nil || !bytes.Equal(body, want) {
+		if body, readErr := os.ReadFile(media.Album[index].Path); readErr != nil || !bytes.Equal(body, want) {
 			t.Errorf("downloaded photo %d = %q, %v", index+1, body, readErr)
 		}
 	}
-	jobDir := filepath.Dir(media.Photos[0])
+	jobDir := filepath.Dir(media.Album[0].Path)
 	if err := media.Cleanup(); err != nil {
 		t.Fatal(err)
 	}

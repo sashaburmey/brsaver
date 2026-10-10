@@ -76,6 +76,8 @@ func supportedLink(raw string) (Link, bool) {
 		provider = "Facebook"
 	case host == "open.spotify.com" && spotifyTrackID(parsed) != "":
 		provider = "Spotify"
+	case isThreadsHost(host) && threadsPostCode(parsed) != "":
+		provider = "Threads"
 	default:
 		return Link{}, false
 	}
@@ -112,6 +114,35 @@ func spotifyTrackID(parsed *url.URL) string {
 		}
 	}
 	return parts[1]
+}
+
+// threadsPostCode accepts /@user/post/CODE and short /t/CODE post links.
+func threadsPostCode(parsed *url.URL) string {
+	if parsed == nil || !isThreadsHost(strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")) {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	code := ""
+	switch {
+	case len(parts) >= 3 && len(parts[0]) > 1 && strings.HasPrefix(parts[0], "@") && strings.ToLower(parts[1]) == "post":
+		code = parts[2]
+	case len(parts) >= 2 && strings.ToLower(parts[0]) == "t":
+		code = parts[1]
+	}
+	if len(code) < 5 || len(code) > 64 {
+		return ""
+	}
+	for _, character := range code {
+		if (character < '0' || character > '9') && (character < 'A' || character > 'Z') &&
+			(character < 'a' || character > 'z') && character != '_' && character != '-' {
+			return ""
+		}
+	}
+	return code
+}
+
+func isThreadsHost(host string) bool {
+	return hostMatches(host, "threads.com") || hostMatches(host, "threads.net")
 }
 
 func hostMatches(host, domain string) bool {

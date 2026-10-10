@@ -31,7 +31,7 @@ type telegramClient interface {
 	SendText(context.Context, int64, int, int, string) error
 	SendVideo(context.Context, int64, int, int, string) error
 	SendAudio(context.Context, int64, int, int, string, string, string, int) error
-	SendPhotos(context.Context, int64, int, int, []string) error
+	SendAlbum(context.Context, int64, int, int, []telegram.AlbumItem) error
 }
 
 type mediaDownloader interface {
@@ -165,6 +165,11 @@ func (b *Bot) handle(ctx context.Context, item job) {
 	downloadCtx, cancelDownload := context.WithTimeout(ctx, b.config.DownloadTimeout)
 	file, err := b.downloader.Download(downloadCtx, item.link.URL)
 	cancelDownload()
+	if errors.Is(err, media.ErrNoMedia) {
+		// Text-only posts are shared often, so they are skipped silently.
+		logger.Info("post has no media")
+		return
+	}
 	if err != nil {
 		if ctx.Err() == nil {
 			logger.Error("media download failed", "error", err)
@@ -177,18 +182,18 @@ func (b *Bot) handle(ctx context.Context, item job) {
 			logger.Error("cannot remove temporary media", "error", cleanupErr)
 		}
 	}()
-	if len(file.Photos) > 0 {
+	if len(file.Album) > 0 {
 		uploadCtx, cancelUpload := context.WithTimeout(ctx, b.config.UploadTimeout)
-		err = b.telegram.SendPhotos(uploadCtx, item.chatID, item.messageID, item.threadID, file.Photos)
+		err = b.telegram.SendAlbum(uploadCtx, item.chatID, item.messageID, item.threadID, file.Album)
 		cancelUpload()
 		if err != nil {
 			if ctx.Err() == nil {
-				logger.Error("photo album upload failed", "error", err, "photo_count", len(file.Photos))
+				logger.Error("album upload failed", "error", err, "item_count", len(file.Album))
 				b.notifyError(ctx, item)
 			}
 			return
 		}
-		logger.Info("photo album sent", "photo_count", len(file.Photos))
+		logger.Info("album sent", "item_count", len(file.Album))
 		return
 	}
 	if file.Audio != nil {

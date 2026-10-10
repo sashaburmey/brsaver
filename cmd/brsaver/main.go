@@ -41,7 +41,7 @@ func main() {
 		TikTokDeviceID:     cfg.TikTokDeviceID,
 		Format:             cfg.YTDLPFormat,
 		MaxFileSize:        cfg.MaxDownloadSize,
-		MaxAudioFileSize:   cfg.MaxFileSize,
+		MaxUploadSize:      cfg.MaxFileSize,
 		SizeCheckGap:       cfg.SizeCheckInterval,
 		Attempts:           cfg.DownloadAttempts,
 		RetryDelay:         cfg.DownloadRetryDelay,

@@ -171,7 +171,7 @@ printf '%s\n' "$path"
 
 	downloader, err := NewDownloader(DownloaderConfig{
 		Binary: binary, WorkDir: root, Format: "best", MaxFileSize: 1024 * 1024,
-		MaxAudioFileSize: 512 * 1024, YouTubeCookiesFile: cookiesFile,
+		MaxUploadSize: 512 * 1024, YouTubeCookiesFile: cookiesFile,
 		Attempts: 1, SizeCheckGap: 5 * time.Millisecond,
 	})
 	if err != nil {

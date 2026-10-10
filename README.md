@@ -1,13 +1,14 @@
 # brsaver
 
-A Telegram bot written in Go that detects TikTok, YouTube Shorts, Instagram, Facebook, and Spotify track links in group messages, downloads the media, replies with it as native Telegram video, photo, or audio, and immediately removes all temporary files.
+A Telegram bot written in Go that detects TikTok, YouTube Shorts, Instagram, Facebook, Threads, and Spotify track links in group messages, downloads the media, replies with it as native Telegram video, photo, or audio, and immediately removes all temporary files.
 
 ## Features
 
 - works in groups and supergroups through Telegram long polling;
 - detects plain URLs and hidden `text_link` URLs;
-- supports TikTok, YouTube Shorts, Instagram Reel/Post/TV, Facebook Reel/Watch/Video, and individual Spotify tracks;
+- supports TikTok, YouTube Shorts, Instagram Reel/Post/TV, Facebook Reel/Watch/Video, Threads posts, and individual Spotify tracks;
 - sends TikTok photo posts as native Telegram photos or albums;
+- downloads public Threads videos, photos, and mixed photo/video carousels directly from the post page and sends carousels as Telegram albums; text-only Threads posts are skipped silently;
 - resolves Spotify track metadata, selects a close YouTube audio match by title, artist, and duration, and sends it as an MP3 with Telegram audio metadata;
 - downloads multiple links concurrently through a bounded worker queue;
 - limits processing time, the number of links, and file size (49 MiB by default);
@@ -109,5 +110,7 @@ go vet ./...
 ```
 
 Only download and republish content when you have the appropriate rights. Private or platform-protected media may remain unavailable even when cookies are provided.
+
+Threads support works without cookies for public posts only. Threads has no yt-dlp extractor, so the bot reads the media data embedded in the public post page; if Threads changes that page, the integration may need an update. A single Threads video is compressed like other videos when needed, while videos inside a carousel must already fit within `MAX_FILE_SIZE_MB`.
 
 Spotify support currently accepts individual track links only; album and playlist links are intentionally ignored. Spotify provides the track metadata, while the audio is obtained from a closely matched public YouTube result. The bot rejects a result when its title, artist, or duration is not sufficiently close.

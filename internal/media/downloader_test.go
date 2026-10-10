@@ -316,13 +316,13 @@ printf '%s\n' '{"files":["photo-01.jpg"]}'
 	if err != nil {
 		t.Fatalf("Download() error = %v", err)
 	}
-	if media.Path != "" || len(media.Photos) != 1 {
+	if media.Path != "" || len(media.Album) != 1 || media.Album[0].Video {
 		t.Fatalf("unexpected downloaded media: %#v", media)
 	}
-	if body, err := os.ReadFile(media.Photos[0]); err != nil || string(body) != "photo-data" {
+	if body, err := os.ReadFile(media.Album[0].Path); err != nil || string(body) != "photo-data" {
 		t.Fatalf("downloaded photo = %q, %v", body, err)
 	}
-	jobDir := filepath.Dir(media.Photos[0])
+	jobDir := filepath.Dir(media.Album[0].Path)
 	if err := media.Cleanup(); err != nil {
 		t.Fatal(err)
 	}
