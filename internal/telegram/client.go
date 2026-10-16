@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ type ClientConfig struct {
 
 type Client struct {
 	endpoint      string
+	fileEndpoint  string
 	requestClient *http.Client
 	uploadClient  *http.Client
 	pollSeconds   int
@@ -67,8 +69,10 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.UploadTimeout <= 0 {
 		cfg.UploadTimeout = 3 * time.Minute
 	}
+	baseURL := strings.TrimRight(cfg.APIBaseURL, "/")
 	return &Client{
-		endpoint:      strings.TrimRight(cfg.APIBaseURL, "/") + "/bot" + cfg.Token + "/",
+		endpoint:      baseURL + "/bot" + cfg.Token + "/",
+		fileEndpoint:  baseURL + "/file/bot" + cfg.Token + "/",
 		requestClient: &http.Client{Timeout: cfg.PollTimeout + 15*time.Second},
 		uploadClient:  &http.Client{Timeout: cfg.UploadTimeout},
 		pollSeconds:   int(cfg.PollTimeout / time.Second),
@@ -136,6 +140,42 @@ func (c *Client) SendAudio(ctx context.Context, chatID int64, messageID, threadI
 	return c.doMultipart(ctx, "sendAudio", func(writer *multipart.Writer) error {
 		return writeAudioForm(writer, file, chatID, messageID, threadID, filepath.Base(path), title, performer, duration)
 	})
+}
+
+// DownloadFile loads a file of at most maxSize bytes into memory and returns
+// its contents together with the base name Telegram stored the file under.
+func (c *Client) DownloadFile(ctx context.Context, fileID string, maxSize int64) ([]byte, string, error) {
+	var file File
+	if err := c.doJSON(ctx, "getFile", map[string]string{"file_id": fileID}, &file); err != nil {
+		return nil, "", err
+	}
+	if file.FilePath == "" {
+		return nil, "", errors.New("Telegram returned no file path")
+	}
+	if file.FileSize > maxSize {
+		return nil, "", fmt.Errorf("file is too large: %d bytes", file.FileSize)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.fileEndpoint+file.FilePath, nil)
+	if err != nil {
+		// The request URL contains the bot token, so the parse error is not wrapped.
+		return nil, "", errors.New("create Telegram file request: invalid file path")
+	}
+	response, err := c.uploadClient.Do(req)
+	if err != nil {
+		return nil, "", safeHTTPError("download Telegram file", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("unexpected Telegram file HTTP status %d", response.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, maxSize+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("read Telegram file: %w", err)
+	}
+	if int64(len(data)) > maxSize {
+		return nil, "", errors.New("file is too large")
+	}
+	return data, path.Base(file.FilePath), nil
 }
 
 // SendAlbum sends photos and videos as Telegram albums of at most ten items.

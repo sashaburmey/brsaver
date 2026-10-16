@@ -14,6 +14,27 @@ type Message struct {
 	Caption         string          `json:"caption,omitempty"`
 	Entities        []MessageEntity `json:"entities,omitempty"`
 	CaptionEntities []MessageEntity `json:"caption_entities,omitempty"`
+	Voice           *Voice          `json:"voice,omitempty"`
+	VideoNote       *VideoNote      `json:"video_note,omitempty"`
+}
+
+type Voice struct {
+	FileID   string `json:"file_id"`
+	Duration int    `json:"duration"`
+	MimeType string `json:"mime_type,omitempty"`
+	FileSize int64  `json:"file_size,omitempty"`
+}
+
+type VideoNote struct {
+	FileID   string `json:"file_id"`
+	Duration int    `json:"duration"`
+	FileSize int64  `json:"file_size,omitempty"`
+}
+
+type File struct {
+	FileID   string `json:"file_id"`
+	FileSize int64  `json:"file_size,omitempty"`
+	FilePath string `json:"file_path,omitempty"`
 }
 
 type MessageEntity struct {

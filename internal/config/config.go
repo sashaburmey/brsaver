@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	defaultMaxFileSize     = 49 * 1024 * 1024
-	defaultMaxDownloadSize = 250 * 1024 * 1024
-	defaultFormat          = "bestvideo[height<=1080][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4][vcodec^=avc1]/best[height<=1080][ext=mp4][vcodec^=h264]/best[height<=1080][ext=mp4]/best[height<=1080]/best"
+	defaultMaxFileSize      = 49 * 1024 * 1024
+	defaultMaxDownloadSize  = 250 * 1024 * 1024
+	defaultTranscriptionURL = "https://api.groq.com/openai/v1"
+	defaultFormat           = "bestvideo[height<=1080][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4][vcodec^=avc1]/best[height<=1080][ext=mp4][vcodec^=h264]/best[height<=1080][ext=mp4]/best[height<=1080]/best"
 )
 
 type Config struct {
@@ -43,6 +44,15 @@ type Config struct {
 	NotifyErrors       bool
 	CompressOversized  bool
 	AllowedChatIDs     map[int64]struct{}
+
+	// Voice message transcription is enabled when TranscriptionAPIKey is set.
+	TranscriptionAPIBaseURL string
+	TranscriptionAPIKey     string
+	TranscriptionModel      string
+	TranscriptionLanguage   string
+	TranscriptionPrompt     string
+	TranscriptionTimeout    time.Duration
+	MaxVoiceDuration        time.Duration
 }
 
 func Load() (Config, error) {
@@ -58,6 +68,12 @@ func Load() (Config, error) {
 		YouTubeCookiesFile: strings.TrimSpace(os.Getenv("YT_DLP_YOUTUBE_COOKIES_FILE")),
 		TikTokDeviceID:     strings.TrimSpace(os.Getenv("TIKTOK_DEVICE_ID")),
 		DownloadDir:        envOr("DOWNLOAD_DIR", filepath.Join(os.TempDir(), "brsaver")),
+
+		TranscriptionAPIBaseURL: envOr("TRANSCRIPTION_API_BASE_URL", defaultTranscriptionURL),
+		TranscriptionAPIKey:     strings.TrimSpace(os.Getenv("TRANSCRIPTION_API_KEY")),
+		TranscriptionModel:      envOr("TRANSCRIPTION_MODEL", "whisper-large-v3"),
+		TranscriptionLanguage:   strings.ToLower(envOr("TRANSCRIPTION_LANGUAGE", "uk")),
+		TranscriptionPrompt:     strings.TrimSpace(os.Getenv("TRANSCRIPTION_PROMPT")),
 	}
 
 	if cfg.TelegramToken == "" {
@@ -117,6 +133,19 @@ func Load() (Config, error) {
 	}
 	if cfg.AllowedChatIDs, err = envChatIDs("ALLOWED_CHAT_IDS"); err != nil {
 		return Config{}, err
+	}
+	if cfg.TranscriptionTimeout, err = envDuration("TRANSCRIPTION_TIMEOUT", 2*time.Minute); err != nil {
+		return Config{}, err
+	}
+	if cfg.MaxVoiceDuration, err = envDuration("MAX_VOICE_DURATION", 10*time.Minute); err != nil {
+		return Config{}, err
+	}
+	transcriptionURL, err := url.Parse(cfg.TranscriptionAPIBaseURL)
+	if err != nil || (transcriptionURL.Scheme != "http" && transcriptionURL.Scheme != "https") || transcriptionURL.Host == "" {
+		return Config{}, fmt.Errorf("TRANSCRIPTION_API_BASE_URL must be an absolute HTTP(S) URL")
+	}
+	if cfg.TranscriptionLanguage == "auto" {
+		cfg.TranscriptionLanguage = ""
 	}
 
 	if cfg.PollTimeout < time.Second || cfg.PollTimeout > 60*time.Second {

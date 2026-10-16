@@ -6,12 +6,25 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"brsaver/internal/media"
 	"brsaver/internal/telegram"
 )
 
-const publicDownloadError = "Не вдалося завантажити це медіа. Можливо, воно приватне, недоступне або завелике."
+const (
+	publicDownloadError      = "Не вдалося завантажити це медіа. Можливо, воно приватне, недоступне або завелике."
+	publicTranscriptionError = "Не вдалося розшифрувати це голосове повідомлення."
+)
+
+const (
+	// The Bot API only serves files up to 20 MB through getFile.
+	maxVoiceFileSize = 20 * 1024 * 1024
+	// Telegram allows 4096 characters per message; the margin covers characters
+	// that count as two UTF-16 code units.
+	maxTextLength = 4000
+)
 
 type Config struct {
 	Workers            int
@@ -20,8 +33,11 @@ type Config struct {
 	DownloadTimeout    time.Duration
 	UploadTimeout      time.Duration
 	CompressionTimeout time.Duration
-	NotifyErrors       bool
-	AllowedChatIDs     map[int64]struct{}
+	// TranscriptionTimeout covers downloading a voice message and transcribing it.
+	TranscriptionTimeout time.Duration
+	MaxVoiceDuration     time.Duration
+	NotifyErrors         bool
+	AllowedChatIDs       map[int64]struct{}
 }
 
 type telegramClient interface {
@@ -32,6 +48,7 @@ type telegramClient interface {
 	SendVideo(context.Context, int64, int, int, string) error
 	SendAudio(context.Context, int64, int, int, string, string, string, int) error
 	SendAlbum(context.Context, int64, int, int, []telegram.AlbumItem) error
+	DownloadFile(context.Context, string, int64) ([]byte, string, error)
 }
 
 type mediaDownloader interface {
@@ -42,12 +59,19 @@ type mediaTranscoder interface {
 	Compress(context.Context, *media.DownloadedFile) (media.CompressionResult, error)
 }
 
+// Transcriber converts speech to text. A nil Transcriber disables voice
+// message transcription.
+type Transcriber interface {
+	Transcribe(ctx context.Context, filename string, audio []byte) (string, error)
+}
+
 type Bot struct {
-	telegram   telegramClient
-	downloader mediaDownloader
-	transcoder mediaTranscoder
-	config     Config
-	logger     *slog.Logger
+	telegram    telegramClient
+	downloader  mediaDownloader
+	transcoder  mediaTranscoder
+	transcriber Transcriber
+	config      Config
+	logger      *slog.Logger
 }
 
 type job struct {
@@ -55,13 +79,24 @@ type job struct {
 	messageID int
 	threadID  int
 	link      media.Link
+	voice     *voiceMessage
 }
 
-func New(client telegramClient, downloader mediaDownloader, transcoder mediaTranscoder, cfg Config, logger *slog.Logger) *Bot {
+type voiceMessage struct {
+	kind     string
+	fileID   string
+	duration int
+	fileSize int64
+}
+
+func New(client telegramClient, downloader mediaDownloader, transcoder mediaTranscoder, transcriber Transcriber, cfg Config, logger *slog.Logger) *Bot {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Bot{telegram: client, downloader: downloader, transcoder: transcoder, config: cfg, logger: logger}
+	return &Bot{
+		telegram: client, downloader: downloader, transcoder: transcoder, transcriber: transcriber,
+		config: cfg, logger: logger,
+	}
 }
 
 func (b *Bot) Run(ctx context.Context) error {
@@ -74,7 +109,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	b.logger.Info("bot started", "username", user.Username, "workers", b.config.Workers)
+	b.logger.Info("bot started", "username", user.Username, "workers", b.config.Workers, "transcription", b.transcriber != nil)
 
 	jobs := make(chan job, b.config.QueueSize)
 	var workers sync.WaitGroup
@@ -141,7 +176,13 @@ func (b *Bot) jobsForUpdate(update telegram.Update) []job {
 	if len(links) > b.config.MaxLinksPerMessage {
 		links = links[:b.config.MaxLinksPerMessage]
 	}
-	result := make([]job, 0, len(links))
+	result := make([]job, 0, len(links)+1)
+	if voice := voiceFromMessage(message); voice != nil && b.transcriber != nil {
+		result = append(result, job{
+			chatID: message.Chat.ID, messageID: message.MessageID,
+			threadID: message.MessageThreadID, voice: voice,
+		})
+	}
 	for _, link := range links {
 		result = append(result, job{
 			chatID: message.Chat.ID, messageID: message.MessageID,
@@ -149,6 +190,22 @@ func (b *Bot) jobsForUpdate(update telegram.Update) []job {
 		})
 	}
 	return result
+}
+
+func voiceFromMessage(message *telegram.Message) *voiceMessage {
+	switch {
+	case message.Voice != nil:
+		return &voiceMessage{
+			kind: "voice", fileID: message.Voice.FileID,
+			duration: message.Voice.Duration, fileSize: message.Voice.FileSize,
+		}
+	case message.VideoNote != nil:
+		return &voiceMessage{
+			kind: "video_note", fileID: message.VideoNote.FileID,
+			duration: message.VideoNote.Duration, fileSize: message.VideoNote.FileSize,
+		}
+	}
+	return nil
 }
 
 func (b *Bot) worker(ctx context.Context, jobs <-chan job) {
@@ -161,6 +218,10 @@ func (b *Bot) worker(ctx context.Context, jobs <-chan job) {
 }
 
 func (b *Bot) handle(ctx context.Context, item job) {
+	if item.voice != nil {
+		b.transcribe(ctx, item)
+		return
+	}
 	logger := b.logger.With("chat_id", item.chatID, "message_id", item.messageID, "provider", item.link.Provider)
 	downloadCtx, cancelDownload := context.WithTimeout(ctx, b.config.DownloadTimeout)
 	file, err := b.downloader.Download(downloadCtx, item.link.URL)
@@ -241,13 +302,87 @@ func (b *Bot) handle(ctx context.Context, item job) {
 	logger.Info("media sent")
 }
 
+func (b *Bot) transcribe(ctx context.Context, item job) {
+	voice := item.voice
+	logger := b.logger.With("chat_id", item.chatID, "message_id", item.messageID, "kind", voice.kind, "duration", voice.duration)
+	if limit := b.config.MaxVoiceDuration; limit > 0 && time.Duration(voice.duration)*time.Second > limit {
+		logger.Info("voice message is too long to transcribe")
+		return
+	}
+	if voice.fileSize > maxVoiceFileSize {
+		logger.Info("voice message is too large to transcribe", "file_size", voice.fileSize)
+		return
+	}
+
+	transcriptionCtx, cancel := context.WithTimeout(ctx, b.config.TranscriptionTimeout)
+	audio, filename, err := b.telegram.DownloadFile(transcriptionCtx, voice.fileID, maxVoiceFileSize)
+	var text string
+	if err == nil {
+		text, err = b.transcriber.Transcribe(transcriptionCtx, filename, audio)
+	}
+	cancel()
+	if err != nil {
+		if ctx.Err() == nil {
+			logger.Error("voice transcription failed", "error", err)
+			b.notifyError(ctx, item)
+		}
+		return
+	}
+	if text == "" {
+		logger.Info("voice message has no recognizable speech")
+		return
+	}
+
+	for _, part := range splitText(text, maxTextLength) {
+		sendCtx, cancelSend := context.WithTimeout(ctx, 15*time.Second)
+		err = b.telegram.SendText(sendCtx, item.chatID, item.messageID, item.threadID, part)
+		cancelSend()
+		if err != nil {
+			if ctx.Err() == nil {
+				logger.Error("transcript upload failed", "error", err)
+			}
+			return
+		}
+	}
+	logger.Info("voice transcribed", "characters", utf8.RuneCountInString(text))
+}
+
+// splitText cuts text into parts of at most limit runes, preferring to break
+// at whitespace so that words stay intact.
+func splitText(text string, limit int) []string {
+	var parts []string
+	runes := []rune(text)
+	for len(runes) > limit {
+		cut := limit
+		for index := limit; index > limit/2; index-- {
+			if unicode.IsSpace(runes[index]) {
+				cut = index
+				break
+			}
+		}
+		parts = append(parts, string(runes[:cut]))
+		runes = runes[cut:]
+		for len(runes) > 0 && unicode.IsSpace(runes[0]) {
+			runes = runes[1:]
+		}
+	}
+	if len(runes) > 0 {
+		parts = append(parts, string(runes))
+	}
+	return parts
+}
+
 func (b *Bot) notifyError(ctx context.Context, item job) {
 	if !b.config.NotifyErrors || ctx.Err() != nil {
 		return
 	}
+	message := publicDownloadError
+	if item.voice != nil {
+		message = publicTranscriptionError
+	}
 	notifyCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	if err := b.telegram.SendText(notifyCtx, item.chatID, item.messageID, item.threadID, publicDownloadError); err != nil && !errors.Is(err, context.Canceled) {
+	if err := b.telegram.SendText(notifyCtx, item.chatID, item.messageID, item.threadID, message); err != nil && !errors.Is(err, context.Canceled) {
 		b.logger.Error("cannot notify chat about failure", "error", err, "chat_id", item.chatID)
 	}
 }

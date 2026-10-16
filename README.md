@@ -1,6 +1,6 @@
 # brsaver
 
-A Telegram bot written in Go that detects TikTok, YouTube Shorts, Instagram, Facebook, Threads, and Spotify track links in group messages, downloads the media, replies with it as native Telegram video, photo, or audio, and immediately removes all temporary files.
+A Telegram bot written in Go that detects TikTok, YouTube Shorts, Instagram, Facebook, Threads, and Spotify track links in group messages, downloads the media, replies with it as native Telegram video, photo, or audio, and immediately removes all temporary files. It can also reply to voice messages and video notes with their text transcript.
 
 ## Features
 
@@ -10,6 +10,7 @@ A Telegram bot written in Go that detects TikTok, YouTube Shorts, Instagram, Fac
 - sends TikTok photo posts as native Telegram photos or albums;
 - downloads public Threads videos, photos, and mixed photo/video carousels directly from the post page and sends carousels as Telegram albums; text-only Threads posts are skipped silently;
 - resolves Spotify track metadata, selects a close YouTube audio match by title, artist, and duration, and sends it as an MP3 with Telegram audio metadata;
+- optionally transcribes voice messages and round video notes (Ukrainian by default) through a free Groq Whisper API key or any other OpenAI-compatible transcription server;
 - downloads multiple links concurrently through a bounded worker queue;
 - limits processing time, the number of links, and file size (49 MiB by default);
 - automatically compresses oversized videos to H.264/AAC using two-pass `ffmpeg` encoding;
@@ -88,6 +89,13 @@ go run ./cmd/brsaver
 | `YT_DLP_COOKIES_FILE` | empty | Netscape cookies file for content you are authorized to access |
 | `YT_DLP_YOUTUBE_COOKIES_FILE` | empty | Separate YouTube/Google cookies file used for YouTube Shorts and Spotify audio matching |
 | `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Bot API URL, including a local Bot API server if used |
+| `TRANSCRIPTION_API_KEY` | empty | Enables voice message transcription; see below |
+| `TRANSCRIPTION_API_BASE_URL` | `https://api.groq.com/openai/v1` | Any OpenAI-compatible `/audio/transcriptions` API |
+| `TRANSCRIPTION_MODEL` | `whisper-large-v3` | Speech recognition model |
+| `TRANSCRIPTION_LANGUAGE` | `uk` | ISO-639-1 speech language; `auto` enables auto-detection |
+| `TRANSCRIPTION_PROMPT` | empty | Optional hint with names or terms the model should spell correctly |
+| `TRANSCRIPTION_TIMEOUT` | `2m` | Timeout for downloading and transcribing one voice message |
+| `MAX_VOICE_DURATION` | `10m` | Longer voice messages are skipped silently |
 
 Never commit the cookies file to Git. In Docker, mount it read-only and configure its path through an environment variable:
 
@@ -101,6 +109,16 @@ services:
       YT_DLP_COOKIES_FILE: /run/secrets/cookies.txt
       YT_DLP_YOUTUBE_COOKIES_FILE: /run/secrets/youtube-cookies.txt
 ```
+
+## Voice message transcription
+
+Transcription is disabled until `TRANSCRIPTION_API_KEY` is set. When enabled, the bot replies to every voice message and video note in allowed groups with its text; long transcripts are split into several messages. Audio is kept only in memory and never written to disk.
+
+The default backend is [Groq](https://console.groq.com/keys): create an API key on the free plan and put it into `.env`. At the time of writing, the free plan includes about 8 hours of audio per day (28,800 audio seconds, 2,000 requests), which is enough for an ordinary group chat. Each request is billed as at least 10 seconds. If the limit is exceeded, the bot replies that the voice message could not be transcribed. Check the current limits in the Groq console.
+
+`whisper-large-v3` recognizes Ukrainian noticeably better than `whisper-large-v3-turbo`, so it is the default. Keep `TRANSCRIPTION_LANGUAGE=uk` even when people occasionally speak another language: Whisper often misdetects short Ukrainian clips as Russian.
+
+Any OpenAI-compatible server works through `TRANSCRIPTION_API_BASE_URL`, for example OpenAI itself (`https://api.openai.com/v1` with `gpt-4o-transcribe`) or a self-hosted Whisper server such as [Speaches](https://github.com/speaches-ai/speaches). A self-hosted server needs no paid account, but `TRANSCRIPTION_API_KEY` must still contain any non-empty value.
 
 ## Verification
 

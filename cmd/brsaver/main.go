@@ -10,6 +10,7 @@ import (
 	"brsaver/internal/bot"
 	"brsaver/internal/config"
 	"brsaver/internal/media"
+	"brsaver/internal/speech"
 	"brsaver/internal/telegram"
 )
 
@@ -62,15 +63,34 @@ func main() {
 		os.Exit(1)
 	}
 
-	application := bot.New(client, downloader, transcoder, bot.Config{
-		Workers:            cfg.Workers,
-		QueueSize:          cfg.QueueSize,
-		MaxLinksPerMessage: cfg.MaxLinksPerMessage,
-		DownloadTimeout:    cfg.DownloadTimeout,
-		UploadTimeout:      cfg.UploadTimeout,
-		CompressionTimeout: cfg.CompressionTimeout,
-		NotifyErrors:       cfg.NotifyErrors,
-		AllowedChatIDs:     cfg.AllowedChatIDs,
+	var transcriber bot.Transcriber
+	if cfg.TranscriptionAPIKey != "" {
+		speechClient, err := speech.NewClient(speech.Config{
+			APIBaseURL: cfg.TranscriptionAPIBaseURL,
+			APIKey:     cfg.TranscriptionAPIKey,
+			Model:      cfg.TranscriptionModel,
+			Language:   cfg.TranscriptionLanguage,
+			Prompt:     cfg.TranscriptionPrompt,
+			Timeout:    cfg.TranscriptionTimeout,
+		})
+		if err != nil {
+			logger.Error("cannot initialize speech transcriber", "error", err)
+			os.Exit(1)
+		}
+		transcriber = speechClient
+	}
+
+	application := bot.New(client, downloader, transcoder, transcriber, bot.Config{
+		Workers:              cfg.Workers,
+		QueueSize:            cfg.QueueSize,
+		MaxLinksPerMessage:   cfg.MaxLinksPerMessage,
+		DownloadTimeout:      cfg.DownloadTimeout,
+		UploadTimeout:        cfg.UploadTimeout,
+		CompressionTimeout:   cfg.CompressionTimeout,
+		TranscriptionTimeout: cfg.TranscriptionTimeout,
+		MaxVoiceDuration:     cfg.MaxVoiceDuration,
+		NotifyErrors:         cfg.NotifyErrors,
+		AllowedChatIDs:       cfg.AllowedChatIDs,
 	}, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

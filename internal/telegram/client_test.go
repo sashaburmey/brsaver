@@ -290,6 +290,41 @@ func TestClientSendsSingleAlbumVideoAsVideo(t *testing.T) {
 	}
 }
 
+func TestClientDownloadFile(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/bot123:test-token/getFile":
+			var payload struct {
+				FileID string `json:"file_id"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil || payload.FileID != "voice-id" {
+				t.Errorf("getFile payload = %#v, error = %v", payload, err)
+			}
+			_, _ = io.WriteString(writer, `{"ok":true,"result":{"file_id":"voice-id","file_size":10,"file_path":"voice/file_7.oga"}}`)
+		case "/file/bot123:test-token/voice/file_7.oga":
+			_, _ = io.WriteString(writer, "voice-data")
+		default:
+			t.Errorf("path = %q", request.URL.Path)
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	client := testClient(t, server.URL)
+	data, name, err := client.DownloadFile(context.Background(), "voice-id", 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "voice-data" || name != "file_7.oga" {
+		t.Fatalf("DownloadFile() = %q, %q", data, name)
+	}
+	if _, _, err := client.DownloadFile(context.Background(), "voice-id", 5); err == nil {
+		t.Fatal("DownloadFile() accepted a file above the size limit")
+	}
+}
+
 func TestClientDoesNotExposeTokenInNetworkErrors(t *testing.T) {
 	t.Parallel()
 
