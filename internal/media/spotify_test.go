@@ -165,9 +165,7 @@ path="$directory/spotify-ABCDEFGHIJK.mp3"
 printf 'fake-mp3-data' > "$path"
 printf '%s\n' "$path"
 `
-	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writeExecutable(t, binary, script)
 
 	downloader, err := NewDownloader(DownloaderConfig{
 		Binary: binary, WorkDir: root, Format: "best", MaxFileSize: 1024 * 1024,

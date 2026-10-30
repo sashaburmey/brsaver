@@ -25,7 +25,17 @@ var (
 	ErrFileTooLarge         = errors.New("downloaded media exceeds the configured size limit")
 	ErrNoReliableAudioMatch = errors.New("no sufficiently reliable audio match")
 	ErrNoMedia              = errors.New("post does not contain downloadable photos or videos")
+	ErrRestricted           = errors.New("media is restricted to signed-in or age-verified viewers")
 )
+
+// restrictedMarkers are yt-dlp errors that no retry can fix without account
+// cookies, such as age-restricted or sensitive posts.
+var restrictedMarkers = []string{
+	"isn't available to everyone",
+	"only available for registered users",
+	"Restricted Video",
+	"Sign in to confirm your age",
+}
 
 const (
 	defaultTikTokPhotoHelper = "brsaver-tiktok-photos"
@@ -130,7 +140,7 @@ func (d *Downloader) Download(ctx context.Context, rawURL string) (*DownloadedFi
 		}
 		lastErr = err
 		if ctx.Err() != nil || errors.Is(err, ErrFileTooLarge) || errors.Is(err, ErrNoReliableAudioMatch) ||
-			errors.Is(err, ErrNoMedia) || attempt == d.attempts {
+			errors.Is(err, ErrNoMedia) || errors.Is(err, ErrRestricted) || attempt == d.attempts {
 			break
 		}
 
@@ -270,6 +280,10 @@ func (d *Downloader) downloadVideoOnce(ctx context.Context, rawURL string) (_ *D
 		if detail == "" {
 			detail = err.Error()
 		}
+		if isRestrictedError(detail) {
+			detail = strings.ReplaceAll(detail, rawURL, "[URL]")
+			return nil, fmt.Errorf("%w: %s", ErrRestricted, detail)
+		}
 		if photoURL := extractTikTokPhotoURL(detail); photoURL != "" {
 			photos, playerErr := d.downloadTikTokPlayerPhotos(ctx, photoURL, dir)
 			if playerErr == nil {
@@ -295,6 +309,17 @@ func (d *Downloader) downloadVideoOnce(ctx context.Context, rawURL string) (_ *D
 				detail = strings.ReplaceAll(detail, rawURL, "[URL]")
 				return nil, fmt.Errorf("yt-dlp failed: %s; TikTok player fallback failed: %w", detail, fallbackErr)
 			}
+		} else if isInstagramURL(rawURL) {
+			file, fallbackErr := d.downloadInstagramPost(ctx, rawURL, dir, cookiesFile)
+			if fallbackErr == nil {
+				keep = true
+				return file, nil
+			}
+			if errors.Is(fallbackErr, ErrFileTooLarge) || errors.Is(fallbackErr, ErrNoMedia) {
+				return nil, fallbackErr
+			}
+			detail = strings.ReplaceAll(detail, rawURL, "[URL]")
+			return nil, fmt.Errorf("yt-dlp failed: %s; Instagram post fallback failed: %w", detail, fallbackErr)
 		} else {
 			detail = strings.ReplaceAll(detail, rawURL, "[URL]")
 			return nil, fmt.Errorf("yt-dlp failed: %s", detail)
@@ -452,6 +477,15 @@ func photoAlbum(paths []string) []telegram.AlbumItem {
 		album = append(album, telegram.AlbumItem{Path: path})
 	}
 	return album
+}
+
+func isRestrictedError(detail string) bool {
+	for _, marker := range restrictedMarkers {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractTikTokPhotoURL(detail string) string {

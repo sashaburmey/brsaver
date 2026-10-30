@@ -6,7 +6,7 @@ A Telegram bot written in Go that detects TikTok, YouTube Shorts, Instagram, Fac
 
 - works in groups and supergroups through Telegram long polling;
 - detects plain URLs and hidden `text_link` URLs;
-- supports TikTok, YouTube Shorts, Instagram Reel/Post/TV, Facebook Reel/Watch/Video, Threads posts, and individual Spotify tracks;
+- supports TikTok, YouTube Shorts, Instagram Reel/Post/TV (including photo posts and carousels), Facebook Reel/Watch/Video, Threads posts, and individual Spotify tracks;
 - sends TikTok photo posts as native Telegram photos or albums;
 - downloads public Threads videos, photos, and mixed photo/video carousels directly from the post page and sends carousels as Telegram albums; text-only Threads posts are skipped silently;
 - resolves Spotify track metadata, selects a close YouTube audio match by title, artist, and duration, and sends it as an MP3 with Telegram audio metadata;

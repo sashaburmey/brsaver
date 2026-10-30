@@ -45,18 +45,14 @@ func TestTranscoderUsesTwoPassOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	probe := filepath.Join(dir, "ffprobe")
-	if err := os.WriteFile(probe, []byte("#!/bin/sh\nprintf '60.0\\n'\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writeExecutable(t, probe, "#!/bin/sh\nprintf '60.0\\n'\n")
 	ffmpeg := filepath.Join(dir, "ffmpeg")
 	script := `#!/bin/sh
 output=""
 for argument in "$@"; do output="$argument"; done
 if [ "$output" != "/dev/null" ]; then printf 'compressed-video' > "$output"; fi
 `
-	if err := os.WriteFile(ffmpeg, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writeExecutable(t, ffmpeg, script)
 	transcoder, err := NewTranscoder(TranscoderConfig{
 		FFmpegPath: ffmpeg, FFprobePath: probe, MaxFileSize: 2 * 1024 * 1024,
 		CompressOversized: true,

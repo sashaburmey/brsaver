@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -298,12 +299,10 @@ printf '%s\n' 'ERROR: Unsupported URL: https://www.tiktok.com/@creator/photo/123
 exit 1
 `)
 	photoHelper := filepath.Join(workDir, "fake-photo-helper")
-	if err := os.WriteFile(photoHelper, []byte(`#!/bin/sh
+	writeExecutable(t, photoHelper, `#!/bin/sh
 printf 'photo-data' > "$2/photo-01.jpg"
 printf '%s\n' '{"files":["photo-01.jpg"]}'
-`), 0o700); err != nil {
-		t.Fatal(err)
-	}
+`)
 	downloader, err := NewDownloader(DownloaderConfig{
 		Binary: downloaderBinary, WorkDir: workDir, Format: "best", MaxFileSize: 1024,
 		SizeCheckGap: time.Millisecond, Attempts: 1, PhotoHelper: photoHelper,
@@ -368,10 +367,21 @@ func TestFindOutputPathStaysInsideJobDirectory(t *testing.T) {
 func writeHelper(t *testing.T, dir, body string) string {
 	t.Helper()
 	path := filepath.Join(dir, "fake-yt-dlp")
-	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+	writeExecutable(t, path, body)
+	return path
+}
+
+// writeExecutable holds syscall.ForkLock while the script is open for writing.
+// Otherwise a process forked by a parallel test can inherit the descriptor,
+// and executing the script fails with "text file busy".
+func writeExecutable(t *testing.T, path, body string) {
+	t.Helper()
+	syscall.ForkLock.Lock()
+	err := os.WriteFile(path, []byte(body), 0o700)
+	syscall.ForkLock.Unlock()
+	if err != nil {
 		t.Fatal(err)
 	}
-	return path
 }
 
 func newTestDownloader(t *testing.T, binary, workDir string, maxSize int64) *Downloader {
