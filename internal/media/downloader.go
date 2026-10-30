@@ -221,6 +221,10 @@ func (d *Downloader) downloadVideoOnce(ctx context.Context, rawURL string) (_ *D
 	if isTikTokURL(rawURL) {
 		args = append(args, "--impersonate", "chrome")
 	}
+	instagram := isInstagramURL(rawURL)
+	if instagram {
+		args = append(args, "--ignore-no-formats-error", "--print", instagramEntryTemplate)
+	}
 	args = append(args, "--", rawURL)
 
 	commandCtx, cancel := context.WithCancel(ctx)
@@ -275,6 +279,20 @@ func (d *Downloader) downloadVideoOnce(ctx context.Context, rawURL string) (_ *D
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+	if instagram {
+		// yt-dlp fails on photo items, so a printed post is handled even when
+		// the command itself reports an error.
+		if entries := parseInstagramOutput(stdout.String(), dir); len(entries) > 0 {
+			file, instagramErr := d.instagramMedia(ctx, entries, dir)
+			if instagramErr == nil {
+				keep = true
+				return file, nil
+			}
+			if err == nil || errors.Is(instagramErr, ErrFileTooLarge) || errors.Is(instagramErr, ErrNoMedia) {
+				return nil, instagramErr
+			}
+		}
+	}
 	if err != nil {
 		detail := strings.TrimSpace(stderr.String())
 		if detail == "" {
@@ -309,17 +327,6 @@ func (d *Downloader) downloadVideoOnce(ctx context.Context, rawURL string) (_ *D
 				detail = strings.ReplaceAll(detail, rawURL, "[URL]")
 				return nil, fmt.Errorf("yt-dlp failed: %s; TikTok player fallback failed: %w", detail, fallbackErr)
 			}
-		} else if isInstagramURL(rawURL) {
-			file, fallbackErr := d.downloadInstagramPost(ctx, rawURL, dir, cookiesFile)
-			if fallbackErr == nil {
-				keep = true
-				return file, nil
-			}
-			if errors.Is(fallbackErr, ErrFileTooLarge) || errors.Is(fallbackErr, ErrNoMedia) {
-				return nil, fallbackErr
-			}
-			detail = strings.ReplaceAll(detail, rawURL, "[URL]")
-			return nil, fmt.Errorf("yt-dlp failed: %s; Instagram post fallback failed: %w", detail, fallbackErr)
 		} else {
 			detail = strings.ReplaceAll(detail, rawURL, "[URL]")
 			return nil, fmt.Errorf("yt-dlp failed: %s", detail)
@@ -362,6 +369,23 @@ func (d *Downloader) copyCookiesForURL(dir, rawURL string) (string, error) {
 		return copyCookieFile(d.youTubeCookiesFile, dir, "youtube-cookies.txt")
 	}
 	return d.copyCookies(dir)
+}
+
+// CheckCookiesFile reports why a configured cookies file cannot be used.
+// Docker creates an empty directory in place of a missing bind-mounted file,
+// and an empty file is what `touch` leaves to satisfy such a mount.
+func CheckCookiesFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("cookies file is not a regular file")
+	}
+	if info.Size() == 0 {
+		return errors.New("cookies file is empty")
+	}
+	return nil
 }
 
 func copyCookieFile(sourcePath, dir, filename string) (string, error) {

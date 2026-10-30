@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -61,6 +62,35 @@ func TestHandleSendsDownloadedPhotosWithoutTranscoding(t *testing.T) {
 	if len(client.album) != 2 || client.chatID != -1001 || client.messageID != 15 || client.threadID != 9 {
 		t.Fatalf("unexpected photo upload: %#v", client)
 	}
+	// The download finishes at once, so the status may already show photos.
+	if len(client.actions) == 0 {
+		t.Fatal("no chat action was sent")
+	}
+	for _, action := range client.actions {
+		if action != chatActionUploadVideo && action != chatActionUploadPhoto {
+			t.Fatalf("unexpected chat action %q", action)
+		}
+	}
+}
+
+func TestHandleEndsChatStatusBeforeErrorReply(t *testing.T) {
+	t.Parallel()
+
+	client := &photoTelegramClient{}
+	application := New(client, failingMediaDownloader{}, rejectingTranscoder{}, nil, Config{
+		DownloadTimeout: time.Second, UploadTimeout: time.Second, CompressionTimeout: time.Second, NotifyErrors: true,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	application.handle(context.Background(), job{
+		chatID: -1001, messageID: 15,
+		link: media.Link{URL: "https://www.instagram.com/reel/Example01/", Provider: "Instagram"},
+	})
+
+	if len(client.events) == 0 || client.events[len(client.events)-1] != "text:"+publicDownloadError {
+		t.Fatalf("events = %v, want the error reply last", client.events)
+	}
+	if client.events[0] != "action:"+chatActionUploadVideo {
+		t.Fatalf("events = %v, want the upload status first", client.events)
+	}
 }
 
 func TestHandleSendsDownloadedAudioWithoutTranscoding(t *testing.T) {
@@ -78,6 +108,9 @@ func TestHandleSendsDownloadedAudioWithoutTranscoding(t *testing.T) {
 	if client.audioPath != "track.mp3" || client.audioTitle != "Cut to the Feeling" ||
 		client.audioPerformer != "Carly Rae Jepsen" || client.audioDuration != 208 {
 		t.Fatalf("unexpected audio upload: %#v", client)
+	}
+	if len(client.actions) == 0 || client.actions[0] != chatActionUploadDocument {
+		t.Fatalf("chat actions = %v, want %q first", client.actions, chatActionUploadDocument)
 	}
 }
 
@@ -180,6 +213,9 @@ func TestHandleReportsTranscriptionFailure(t *testing.T) {
 	if len(client.texts) != 1 || client.texts[0] != publicTranscriptionError {
 		t.Fatalf("unexpected replies: %#v", client.texts)
 	}
+	if len(client.events) != 2 || client.events[0] != "action:"+chatActionTyping {
+		t.Fatalf("events = %v, want one typing status before the reply", client.events)
+	}
 }
 
 func TestSplitTextKeepsWordsAndLimit(t *testing.T) {
@@ -201,6 +237,9 @@ func TestSplitTextKeepsWordsAndLimit(t *testing.T) {
 }
 
 type photoTelegramClient struct {
+	mu                          sync.Mutex
+	actions                     []string
+	events                      []string
 	texts                       []string
 	fileID                      string
 	file                        []byte
@@ -219,12 +258,23 @@ func (c *photoTelegramClient) GetMe(context.Context) (telegram.User, error) {
 
 func (c *photoTelegramClient) DeleteWebhook(context.Context) error { return nil }
 
+func (c *photoTelegramClient) SendChatAction(_ context.Context, _ int64, _ int, action string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.actions = append(c.actions, action)
+	c.events = append(c.events, "action:"+action)
+	return nil
+}
+
 func (c *photoTelegramClient) GetUpdates(context.Context, int64) ([]telegram.Update, error) {
 	return nil, nil
 }
 
 func (c *photoTelegramClient) SendText(_ context.Context, _ int64, _, _ int, text string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.texts = append(c.texts, text)
+	c.events = append(c.events, "text:"+text)
 	return nil
 }
 
@@ -260,6 +310,12 @@ func (photoMediaDownloader) Download(context.Context, string) (*media.Downloaded
 }
 
 type noMediaDownloader struct{}
+
+type failingMediaDownloader struct{}
+
+func (failingMediaDownloader) Download(context.Context, string) (*media.DownloadedFile, error) {
+	return nil, errors.New("source unavailable")
+}
 
 func (noMediaDownloader) Download(context.Context, string) (*media.DownloadedFile, error) {
 	return nil, fmt.Errorf("download failed after 1 attempts: %w", media.ErrNoMedia)

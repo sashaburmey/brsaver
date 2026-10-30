@@ -1,45 +1,35 @@
 package media
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
-	"os/exec"
+	"os"
+	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 
 	"brsaver/internal/telegram"
 )
 
-const (
-	instagramMetadataSizeLimit = 8 * 1024 * 1024
-	maxInstagramAlbumItems     = 20
-)
+const maxInstagramAlbumItems = 20
 
-var instagramShortcodePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{5,64}$`)
+// instagramEntryTemplate makes yt-dlp print every post item before its
+// download. Photos have no video formats, so yt-dlp fails on them after this
+// line, but the photo URLs are already known by then.
+const instagramEntryTemplate = "video:%(.{id,format_id,thumbnails})j"
 
-type instagramPostInfo struct {
-	ID string `json:"id"`
-	instagramMediaInfo
-	Entries []instagramMediaInfo `json:"entries"`
-}
+var instagramIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{5,64}$`)
 
-type instagramMediaInfo struct {
-	Formats []struct {
-		FormatID string `json:"format_id"`
-		URL      string `json:"url"`
-		Protocol string `json:"protocol"`
-		VCodec   string `json:"vcodec"`
-		Width    int64  `json:"width"`
-		Height   int64  `json:"height"`
-	} `json:"formats"`
+type instagramEntry struct {
+	ID         string `json:"id"`
+	FormatID   string `json:"format_id"`
 	Thumbnails []struct {
 		URL string `json:"url"`
 	} `json:"thumbnails"`
+	path string
 }
 
 func isInstagramURL(rawURL string) bool {
@@ -50,153 +40,104 @@ func isInstagramURL(rawURL string) bool {
 	return hostMatches(strings.ToLower(strings.TrimSuffix(parsed.Hostname(), ".")), "instagram.com")
 }
 
-// downloadInstagramPost handles posts yt-dlp cannot download as a video:
-// photos and carousels. yt-dlp still resolves the post metadata, including
-// the photo URLs, when it is told to ignore the missing video formats.
-func (d *Downloader) downloadInstagramPost(ctx context.Context, rawURL, dir, cookiesFile string) (*DownloadedFile, error) {
-	info, err := d.fetchInstagramPostInfo(ctx, rawURL, cookiesFile)
-	if err != nil {
-		return nil, err
-	}
-	items, err := instagramPostMedia(info)
-	if err != nil {
-		return nil, err
-	}
-	code := info.ID
-	if !instagramShortcodePattern.MatchString(code) {
-		code = "post"
-	}
-
-	if len(items) == 1 && items[0].Video {
-		path, _, err := d.downloadThreadsItem(ctx, items[0], dir, "instagram-"+code, d.maxFileSize)
-		if err != nil {
-			return nil, err
+// parseInstagramOutput pairs every printed post item with the video file
+// yt-dlp printed right after it, if any.
+func parseInstagramOutput(output, dir string) []instagramEntry {
+	var entries []instagramEntry
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "{") {
+			var entry instagramEntry
+			if json.Unmarshal([]byte(line), &entry) == nil {
+				entries = append(entries, entry)
+			}
+			continue
 		}
-		return &DownloadedFile{Path: path, dir: dir}, nil
-	}
-
-	album := make([]telegram.AlbumItem, 0, len(items))
-	var totalSize int64
-	for index, item := range items {
-		// Album items are uploaded as they are, without compression.
-		limit := min(int64(maxTelegramPhotoSize), d.maxFileSize-totalSize)
-		if item.Video {
-			limit = min(d.maxUploadSize, d.maxFileSize-totalSize)
+		if line == "" || len(entries) == 0 || entries[len(entries)-1].path != "" {
+			continue
 		}
-		path, size, err := d.downloadThreadsItem(ctx, item, dir, fmt.Sprintf("instagram-%s-%02d", code, index+1), limit)
-		if err != nil {
-			return nil, err
+		if !filepath.IsAbs(line) {
+			line = filepath.Join(dir, line)
 		}
-		totalSize += size
-		album = append(album, telegram.AlbumItem{Path: path, Video: item.Video})
+		if info, err := os.Lstat(line); err == nil && info.Mode().IsRegular() && isWithin(line, dir) {
+			entries[len(entries)-1].path = line
+		}
 	}
-	return &DownloadedFile{Album: album, dir: dir}, nil
+	return entries
 }
 
-func (d *Downloader) fetchInstagramPostInfo(ctx context.Context, rawURL, cookiesFile string) (instagramPostInfo, error) {
-	args := []string{
-		"--ignore-config",
-		"--no-cache-dir",
-		"--no-warnings",
-		"--ignore-no-formats-error",
-		"--dump-single-json",
-		"--socket-timeout", "30",
-	}
-	if cookiesFile != "" {
-		args = append(args, "--cookies", cookiesFile)
-	}
-	args = append(args, "--", rawURL)
-
-	cmd := exec.CommandContext(ctx, d.binary, args...)
-	var stdout cappedBuffer
-	stdout.limit = instagramMetadataSizeLimit
-	var stderr limitedBuffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		detail := strings.TrimSpace(stderr.String())
-		if detail == "" {
-			detail = err.Error()
-		}
-		return instagramPostInfo{}, fmt.Errorf("Instagram metadata failed: %s", strings.ReplaceAll(detail, rawURL, "[URL]"))
-	}
-	if stdout.overflow {
-		return instagramPostInfo{}, errors.New("Instagram metadata is too large")
-	}
-	return decodeInstagramPostInfo(stdout.buffer.Bytes())
-}
-
-func decodeInstagramPostInfo(data []byte) (instagramPostInfo, error) {
-	var info instagramPostInfo
-	if err := json.Unmarshal(data, &info); err != nil {
-		return instagramPostInfo{}, fmt.Errorf("decode Instagram metadata: %w", err)
-	}
-	return info, nil
-}
-
-func instagramPostMedia(info instagramPostInfo) ([]threadsMediaItem, error) {
-	entries := info.Entries
-	if len(entries) == 0 {
-		entries = []instagramMediaInfo{info.instagramMediaInfo}
-	}
+// instagramMedia turns the items of one post into a single video or an album.
+// Videos were already downloaded by yt-dlp; photos are fetched from the CDN.
+func (d *Downloader) instagramMedia(ctx context.Context, entries []instagramEntry, dir string) (*DownloadedFile, error) {
 	if len(entries) > maxInstagramAlbumItems {
 		return nil, errors.New("Instagram carousel exceeds the item limit")
 	}
-	items := make([]threadsMediaItem, 0, len(entries))
+	// A single video keeps the regular path, so it can still be compressed.
+	if len(entries) == 1 && entries[0].path != "" {
+		if _, err := checkDownloadedSize(entries[0].path, d.maxFileSize); err != nil {
+			return nil, err
+		}
+		return &DownloadedFile{Path: entries[0].path, dir: dir}, nil
+	}
+
+	album := make([]telegram.AlbumItem, 0, len(entries))
+	var totalSize int64
 	for index, entry := range entries {
-		item, ok := instagramSingleMedia(entry)
-		if !ok {
+		if entry.path != "" {
+			// Album items are uploaded as they are, without compression.
+			size, err := checkDownloadedSize(entry.path, min(d.maxUploadSize, d.maxFileSize-totalSize))
+			if err != nil {
+				return nil, err
+			}
+			totalSize += size
+			album = append(album, telegram.AlbumItem{Path: entry.path, Video: true})
+			continue
+		}
+		if entry.FormatID != "" {
+			return nil, fmt.Errorf("Instagram video item %d was not downloaded", index+1)
+		}
+
+		// yt-dlp lists thumbnails from the worst to the best quality, and the
+		// best one is the original photo.
+		urls := make([]string, 0, len(entry.Thumbnails))
+		for thumbnail := len(entry.Thumbnails) - 1; thumbnail >= 0; thumbnail-- {
+			urls = append(urls, entry.Thumbnails[thumbnail].URL)
+		}
+		urls = validThreadsMediaURLs(urls)
+		if len(urls) == 0 {
 			if len(entries) == 1 {
 				return nil, ErrNoMedia
 			}
 			return nil, fmt.Errorf("Instagram carousel item %d has no trusted media URL", index+1)
 		}
-		items = append(items, item)
-	}
-	return items, nil
-}
-
-func instagramSingleMedia(entry instagramMediaInfo) (threadsMediaItem, bool) {
-	// Only progressive MP4 files can be fetched directly; DASH formats carry
-	// separate audio and video streams.
-	formats := append(entry.Formats[:0:0], entry.Formats...)
-	sort.SliceStable(formats, func(left, right int) bool {
-		return formats[left].Width*formats[left].Height > formats[right].Width*formats[right].Height
-	})
-	videos := make([]string, 0, len(formats))
-	for _, format := range formats {
-		if format.Protocol == "https" && format.VCodec != "none" && !strings.HasPrefix(format.FormatID, "dash-") {
-			videos = append(videos, format.URL)
+		id := entry.ID
+		if !instagramIDPattern.MatchString(id) {
+			id = "photo"
 		}
+		limit := min(int64(maxTelegramPhotoSize), d.maxFileSize-totalSize)
+		path, size, err := d.downloadThreadsItem(ctx, threadsMediaItem{URLs: urls}, dir, fmt.Sprintf("instagram-%02d-%s", index+1, id), limit)
+		if err != nil {
+			return nil, err
+		}
+		totalSize += size
+		album = append(album, telegram.AlbumItem{Path: path})
 	}
-	if videos = validThreadsMediaURLs(videos); len(videos) > 0 {
-		return threadsMediaItem{URLs: videos, Video: true}, true
-	}
-
-	// yt-dlp lists thumbnails from the worst to the best quality, and the
-	// best one is the original photo.
-	photos := make([]string, 0, len(entry.Thumbnails))
-	for index := len(entry.Thumbnails) - 1; index >= 0; index-- {
-		photos = append(photos, entry.Thumbnails[index].URL)
-	}
-	photos = validThreadsMediaURLs(photos)
-	return threadsMediaItem{URLs: photos}, len(photos) > 0
+	return &DownloadedFile{Album: album, dir: dir}, nil
 }
 
-// cappedBuffer keeps up to limit bytes and remembers whether more arrived.
-type cappedBuffer struct {
-	buffer   bytes.Buffer
-	limit    int
-	overflow bool
-}
-
-func (b *cappedBuffer) Write(value []byte) (int, error) {
-	remaining := b.limit - b.buffer.Len()
-	if len(value) > remaining {
-		b.overflow = true
-		_, _ = b.buffer.Write(value[:max(remaining, 0)])
-		return len(value), nil
+func checkDownloadedSize(path string, limit int64) (int64, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return 0, fmt.Errorf("inspect downloaded media: %w", err)
 	}
-	_, _ = b.buffer.Write(value)
-	return len(value), nil
+	if !info.Mode().IsRegular() {
+		return 0, errors.New("downloaded media is not a regular file")
+	}
+	if info.Size() <= 0 {
+		return 0, errors.New("downloaded media is empty")
+	}
+	if info.Size() > limit {
+		return 0, ErrFileTooLarge
+	}
+	return info.Size(), nil
 }
