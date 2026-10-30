@@ -45,6 +45,7 @@ type telegramClient interface {
 	DeleteWebhook(context.Context) error
 	GetUpdates(context.Context, int64) ([]telegram.Update, error)
 	SendText(context.Context, int64, int, int, string) error
+	SendChatAction(context.Context, int64, int, string) error
 	SendVideo(context.Context, int64, int, int, string) error
 	SendAudio(context.Context, int64, int, int, string, string, string, int) error
 	SendAlbum(context.Context, int64, int, int, []telegram.AlbumItem) error
@@ -223,39 +224,70 @@ func (b *Bot) handle(ctx context.Context, item job) {
 		return
 	}
 	logger := b.logger.With("chat_id", item.chatID, "message_id", item.messageID, "provider", item.link.Provider)
+	action := chatActionUploadVideo
+	if item.link.Provider == "Spotify" {
+		action = chatActionUploadDocument
+	}
+	status := b.startChatStatus(ctx, item, action)
+	failed := b.deliverMedia(ctx, item, logger, status)
+	// The status must end before the error reply, or it would reappear after it.
+	status.stop()
+	if failed && ctx.Err() == nil {
+		b.notifyError(ctx, item)
+	}
+}
+
+// deliverMedia downloads, compresses and sends one link. It reports whether
+// the chat should be told about a failure.
+func (b *Bot) deliverMedia(ctx context.Context, item job, logger *slog.Logger, status *chatStatus) bool {
+	started := time.Now()
+	stage := started
+	// elapsed returns the time spent since the previous stage ended.
+	elapsed := func() time.Duration {
+		now := time.Now()
+		duration := now.Sub(stage).Round(time.Millisecond)
+		stage = now
+		return duration
+	}
+
 	downloadCtx, cancelDownload := context.WithTimeout(ctx, b.config.DownloadTimeout)
 	file, err := b.downloader.Download(downloadCtx, item.link.URL)
 	cancelDownload()
+	logger = logger.With("download_time", elapsed())
 	if errors.Is(err, media.ErrNoMedia) {
 		// Text-only posts are shared often, so they are skipped silently.
 		logger.Info("post has no media")
-		return
+		return false
 	}
 	if err != nil {
 		if ctx.Err() == nil {
 			logger.Error("media download failed", "error", err)
-			b.notifyError(ctx, item)
 		}
-		return
+		return true
 	}
 	defer func() {
 		if cleanupErr := file.Cleanup(); cleanupErr != nil {
 			logger.Error("cannot remove temporary media", "error", cleanupErr)
 		}
 	}()
+	totalTime := func() time.Duration { return time.Since(started).Round(time.Millisecond) }
+
 	if len(file.Album) > 0 {
+		if !albumHasVideo(file.Album) {
+			status.set(chatActionUploadPhoto)
+		}
 		uploadCtx, cancelUpload := context.WithTimeout(ctx, b.config.UploadTimeout)
 		err = b.telegram.SendAlbum(uploadCtx, item.chatID, item.messageID, item.threadID, file.Album)
 		cancelUpload()
+		logger = logger.With("upload_time", elapsed(), "total_time", totalTime())
 		if err != nil {
 			if ctx.Err() == nil {
 				logger.Error("album upload failed", "error", err, "item_count", len(file.Album))
-				b.notifyError(ctx, item)
 			}
-			return
+			return true
 		}
 		logger.Info("album sent", "item_count", len(file.Album))
-		return
+		return false
 	}
 	if file.Audio != nil {
 		uploadCtx, cancelUpload := context.WithTimeout(ctx, b.config.UploadTimeout)
@@ -264,26 +296,26 @@ func (b *Bot) handle(ctx context.Context, item job) {
 			file.Audio.Title, file.Audio.Performer, file.Audio.Duration,
 		)
 		cancelUpload()
+		logger = logger.With("upload_time", elapsed(), "total_time", totalTime())
 		if err != nil {
 			if ctx.Err() == nil {
 				logger.Error("audio upload failed", "error", err)
-				b.notifyError(ctx, item)
 			}
-			return
+			return true
 		}
 		logger.Info("audio sent", "match_score", file.Audio.MatchScore)
-		return
+		return false
 	}
 
 	compressionCtx, cancelCompression := context.WithTimeout(ctx, b.config.CompressionTimeout)
 	compression, err := b.transcoder.Compress(compressionCtx, file)
 	cancelCompression()
+	logger = logger.With("compress_time", elapsed())
 	if err != nil {
 		if ctx.Err() == nil {
-			logger.Error("media compression failed", "error", err, "original_size", compression.OriginalSize)
-			b.notifyError(ctx, item)
+			logger.Error("media compression failed", "error", err, "original_size", compression.OriginalSize, "total_time", totalTime())
 		}
-		return
+		return true
 	}
 	if compression.Compressed {
 		logger.Info("media compressed", "original_size", compression.OriginalSize, "final_size", compression.FinalSize)
@@ -292,14 +324,24 @@ func (b *Bot) handle(ctx context.Context, item job) {
 	uploadCtx, cancelUpload := context.WithTimeout(ctx, b.config.UploadTimeout)
 	err = b.telegram.SendVideo(uploadCtx, item.chatID, item.messageID, item.threadID, file.Path)
 	cancelUpload()
+	logger = logger.With("upload_time", elapsed(), "total_time", totalTime())
 	if err != nil {
 		if ctx.Err() == nil {
 			logger.Error("media upload failed", "error", err)
-			b.notifyError(ctx, item)
 		}
-		return
+		return true
 	}
 	logger.Info("media sent")
+	return false
+}
+
+func albumHasVideo(items []telegram.AlbumItem) bool {
+	for _, item := range items {
+		if item.Video {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *Bot) transcribe(ctx context.Context, item job) {
@@ -314,6 +356,8 @@ func (b *Bot) transcribe(ctx context.Context, item job) {
 		return
 	}
 
+	started := time.Now()
+	status := b.startChatStatus(ctx, item, chatActionTyping)
 	transcriptionCtx, cancel := context.WithTimeout(ctx, b.config.TranscriptionTimeout)
 	audio, filename, err := b.telegram.DownloadFile(transcriptionCtx, voice.fileID, maxVoiceFileSize)
 	var text string
@@ -321,6 +365,8 @@ func (b *Bot) transcribe(ctx context.Context, item job) {
 		text, err = b.transcriber.Transcribe(transcriptionCtx, filename, audio)
 	}
 	cancel()
+	status.stop()
+	logger = logger.With("transcription_time", time.Since(started).Round(time.Millisecond))
 	if err != nil {
 		if ctx.Err() == nil {
 			logger.Error("voice transcription failed", "error", err)

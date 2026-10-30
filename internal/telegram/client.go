@@ -118,6 +118,19 @@ func (c *Client) SendText(ctx context.Context, chatID int64, messageID, threadID
 	return c.doJSON(ctx, "sendMessage", payload, nil)
 }
 
+// SendChatAction shows a status such as "sending video..." in the chat. The
+// status disappears after five seconds or when the bot sends a message.
+func (c *Client) SendChatAction(ctx context.Context, chatID int64, threadID int, action string) error {
+	payload := map[string]any{
+		"chat_id": chatID,
+		"action":  action,
+	}
+	if threadID != 0 {
+		payload["message_thread_id"] = threadID
+	}
+	return c.doJSON(ctx, "sendChatAction", payload, nil)
+}
+
 func (c *Client) SendVideo(ctx context.Context, chatID int64, messageID, threadID int, path string) error {
 	file, err := os.Open(path)
 	if err != nil {

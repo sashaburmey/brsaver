@@ -395,3 +395,30 @@ func newTestDownloader(t *testing.T, binary, workDir string, maxSize int64) *Dow
 	}
 	return downloader
 }
+
+func TestCheckCookiesFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	valid := filepath.Join(dir, "cookies.txt")
+	if err := os.WriteFile(valid, []byte("# Netscape HTTP Cookie File\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty := filepath.Join(dir, "empty.txt")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mountedDir := filepath.Join(dir, "mounted.txt")
+	if err := os.Mkdir(mountedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CheckCookiesFile(valid); err != nil {
+		t.Fatalf("CheckCookiesFile(valid) = %v", err)
+	}
+	for _, path := range []string{empty, mountedDir, filepath.Join(dir, "missing.txt")} {
+		if err := CheckCookiesFile(path); err == nil {
+			t.Errorf("CheckCookiesFile(%s) = nil, want an error", filepath.Base(path))
+		}
+	}
+}

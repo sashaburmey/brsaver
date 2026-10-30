@@ -37,8 +37,8 @@ func main() {
 	downloader, err := media.NewDownloader(media.DownloaderConfig{
 		Binary:             cfg.YTDLPPath,
 		WorkDir:            cfg.DownloadDir,
-		CookiesFile:        cfg.CookiesFile,
-		YouTubeCookiesFile: cfg.YouTubeCookiesFile,
+		CookiesFile:        usableCookiesFile(logger, "YT_DLP_COOKIES_FILE", cfg.CookiesFile),
+		YouTubeCookiesFile: usableCookiesFile(logger, "YT_DLP_YOUTUBE_COOKIES_FILE", cfg.YouTubeCookiesFile),
 		TikTokDeviceID:     cfg.TikTokDeviceID,
 		Format:             cfg.YTDLPFormat,
 		MaxFileSize:        cfg.MaxDownloadSize,
@@ -101,4 +101,17 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("bot stopped")
+}
+
+// usableCookiesFile drops an unusable cookies file with a warning. Cookies are
+// optional, so a broken mount must not make every download fail.
+func usableCookiesFile(logger *slog.Logger, setting, path string) string {
+	if path == "" {
+		return ""
+	}
+	if err := media.CheckCookiesFile(path); err != nil {
+		logger.Warn("ignoring cookies file; downloads continue without it", "setting", setting, "path", path, "error", err)
+		return ""
+	}
+	return path
 }
